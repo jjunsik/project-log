@@ -1,0 +1,246 @@
+{
+  "id": "pilot-02",
+  "project_key": "synthetic-project-2",
+  "title": "타임아웃과 미확정 원인",
+  "purpose": "미확정 원인·미측정 성과·현재 권고를 구분합니다.",
+  "repositories": [
+    "backend"
+  ],
+  "questions": [
+    {
+      "id": "problem",
+      "label": "관측된 문제는?"
+    },
+    {
+      "id": "cause",
+      "label": "원인이 확인되었나?"
+    },
+    {
+      "id": "metric",
+      "label": "개선 수치가 측정되었나?"
+    },
+    {
+      "id": "recommendation",
+      "label": "현재 추가 검증 권고는?"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "log",
+      "repository_key": "backend",
+      "source_type": "LOG",
+      "locator": "synthetic/backend/log",
+      "content": "request failed: database connection acquisition timeout",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "agent",
+      "repository_key": "backend",
+      "source_type": "CODEX_ASSISTANT",
+      "locator": "synthetic/backend/agent",
+      "content": "풀 부족일 수 있다. 아직 동시 요청 수나 풀 지표는 측정하지 않았다.",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "config",
+      "repository_key": "backend",
+      "source_type": "CONFIG",
+      "locator": "synthetic/backend/config",
+      "content": "pool_size: 5",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    }
+  ],
+  "events": [
+    {
+      "id": "timeout",
+      "evidence_ids": [
+        "log",
+        "agent",
+        "config"
+      ]
+    }
+  ],
+  "golden_candidate": {
+    "draft": {
+      "title": "타임아웃과 미확정 원인",
+      "claims": [
+        {
+          "id": "claim-problem",
+          "question_id": "problem",
+          "text": "DB 연결 획득 타임아웃이 기록되었다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "log"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-cause",
+          "question_id": "cause",
+          "text": "Connection Pool 부족은 검증이 필요한 가설이다.",
+          "evidence_status": "HYPOTHESIS",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "agent",
+            "config"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-metric",
+          "question_id": "metric",
+          "text": null,
+          "evidence_status": "UNKNOWN",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [],
+          "unknown_reason": "변경 전후 측정 결과가 없다."
+        },
+        {
+          "id": "claim-recommendation",
+          "question_id": "recommendation",
+          "text": "동시 요청과 연결 풀 사용량을 측정해 가설을 검증할 수 있다.",
+          "evidence_status": "INFERRED",
+          "record_kind": "CURRENT_AI_RECOMMENDATION",
+          "evidence_ids": [
+            "agent",
+            "log"
+          ],
+          "unknown_reason": null
+        }
+      ],
+      "links": [
+        {
+          "event_id": "timeout",
+          "story_key": "investigation"
+        }
+      ]
+    },
+    "important_question_ids": [
+      "problem",
+      "cause",
+      "recommendation"
+    ],
+    "forbidden_claims": [
+      "풀이 실제 원인으로 확정됨",
+      "응답 속도가 특정 비율로 향상됨"
+    ],
+    "annotation_notes": "AI-authored candidate. Human approval pending. Questions define a bounded pilot; this is not open-domain extraction coverage."
+  },
+  "mock_initial": {
+    "title": "타임아웃과 미확정 원인",
+    "claims": [
+      {
+        "id": "claim-problem",
+        "question_id": "problem",
+        "text": "DB 연결 획득 타임아웃이 기록되었다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "log"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-cause",
+        "question_id": "cause",
+        "text": "Connection Pool 부족이 실제 원인이다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "agent",
+          "config"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-metric",
+        "question_id": "metric",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "변경 전후 측정 결과가 없다."
+      },
+      {
+        "id": "claim-recommendation",
+        "question_id": "recommendation",
+        "text": "동시 요청과 연결 풀 사용량을 측정해 가설을 검증할 수 있다.",
+        "evidence_status": "INFERRED",
+        "record_kind": "CURRENT_AI_RECOMMENDATION",
+        "evidence_ids": [
+          "agent",
+          "log"
+        ],
+        "unknown_reason": null
+      }
+    ],
+    "links": [
+      {
+        "event_id": "timeout",
+        "story_key": "investigation"
+      }
+    ]
+  },
+  "mock_corrected": {
+    "title": "타임아웃과 미확정 원인",
+    "claims": [
+      {
+        "id": "claim-problem",
+        "question_id": "problem",
+        "text": "DB 연결 획득 타임아웃이 기록되었다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "log"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-cause",
+        "question_id": "cause",
+        "text": "Connection Pool 부족은 검증이 필요한 가설이다.",
+        "evidence_status": "HYPOTHESIS",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "agent",
+          "config"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-metric",
+        "question_id": "metric",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "변경 전후 측정 결과가 없다."
+      },
+      {
+        "id": "claim-recommendation",
+        "question_id": "recommendation",
+        "text": "동시 요청과 연결 풀 사용량을 측정해 가설을 검증할 수 있다.",
+        "evidence_status": "INFERRED",
+        "record_kind": "CURRENT_AI_RECOMMENDATION",
+        "evidence_ids": [
+          "agent",
+          "log"
+        ],
+        "unknown_reason": null
+      }
+    ],
+    "links": [
+      {
+        "event_id": "timeout",
+        "story_key": "investigation"
+      }
+    ]
+  }
+}

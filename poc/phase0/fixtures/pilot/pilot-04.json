@@ -1,0 +1,289 @@
+{
+  "id": "pilot-04",
+  "project_key": "synthetic-project-4",
+  "title": "Android·Backend 검색과 별도 설정 변경",
+  "purpose": "긴 간격의 같은 Story와 같은 파일의 다른 Story를 구분합니다.",
+  "repositories": [
+    "android",
+    "backend"
+  ],
+  "questions": [
+    {
+      "id": "backend",
+      "label": "서버의 변경은?"
+    },
+    {
+      "id": "android",
+      "label": "앱의 변경은?"
+    },
+    {
+      "id": "separate",
+      "label": "별개 작업은?"
+    },
+    {
+      "id": "integration",
+      "label": "통합 실행 결과는?"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "api",
+      "repository_key": "backend",
+      "source_type": "GIT_DIFF",
+      "locator": "synthetic/backend/api",
+      "content": "검색 기능: GET /items에 q 필터 추가. Settings.py의 search_enabled=true.",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "app",
+      "repository_key": "android",
+      "source_type": "CODEX_USER",
+      "locator": "synthetic/android/app",
+      "content": "이전 검색 API의 q 파라미터에 Android 검색 입력을 연결해줘.",
+      "occurred_at": "2026-01-08T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "app-diff",
+      "repository_key": "android",
+      "source_type": "GIT_DIFF",
+      "locator": "synthetic/android/app-diff",
+      "content": "client.get('/items', query={'q': searchText})",
+      "occurred_at": "2026-01-08T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "logs",
+      "repository_key": "backend",
+      "source_type": "GIT_DIFF",
+      "locator": "synthetic/backend/logs",
+      "content": "별도 로깅 작업: Settings.py의 log_level을 INFO로 변경.",
+      "occurred_at": "2026-01-08T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    }
+  ],
+  "events": [
+    {
+      "id": "backend-search",
+      "evidence_ids": [
+        "api"
+      ]
+    },
+    {
+      "id": "android-search",
+      "evidence_ids": [
+        "app",
+        "app-diff"
+      ]
+    },
+    {
+      "id": "log-config",
+      "evidence_ids": [
+        "logs"
+      ]
+    }
+  ],
+  "golden_candidate": {
+    "draft": {
+      "title": "Android·Backend 검색과 별도 설정 변경",
+      "claims": [
+        {
+          "id": "claim-backend",
+          "question_id": "backend",
+          "text": "Backend 검색 API에 q 필터를 추가했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "api"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-android",
+          "question_id": "android",
+          "text": "Android 검색 입력을 q 파라미터에 연결했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "app",
+            "app-diff"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-separate",
+          "question_id": "separate",
+          "text": "같은 설정 파일의 로그 수준 변경은 별도 로깅 작업이다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "logs"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-integration",
+          "question_id": "integration",
+          "text": null,
+          "evidence_status": "UNKNOWN",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [],
+          "unknown_reason": "양쪽을 함께 실행한 통합 테스트 결과는 없다."
+        }
+      ],
+      "links": [
+        {
+          "event_id": "backend-search",
+          "story_key": "search"
+        },
+        {
+          "event_id": "android-search",
+          "story_key": "search"
+        },
+        {
+          "event_id": "log-config",
+          "story_key": "logging"
+        }
+      ]
+    },
+    "important_question_ids": [
+      "backend",
+      "android",
+      "separate"
+    ],
+    "forbidden_claims": [
+      "통합 테스트가 통과했다는 주장",
+      "7일 동안 계속 작업했다는 주장"
+    ],
+    "annotation_notes": "AI-authored candidate. Human approval pending. Questions define a bounded pilot; this is not open-domain extraction coverage."
+  },
+  "mock_initial": {
+    "title": "Android·Backend 검색과 별도 설정 변경",
+    "claims": [
+      {
+        "id": "claim-backend",
+        "question_id": "backend",
+        "text": "Backend 검색 API에 q 필터를 추가했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "api"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-android",
+        "question_id": "android",
+        "text": "Android 검색 입력을 q 파라미터에 연결했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "app",
+          "app-diff"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-separate",
+        "question_id": "separate",
+        "text": "같은 설정 파일의 로그 수준 변경은 별도 로깅 작업이다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "logs"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-integration",
+        "question_id": "integration",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "양쪽을 함께 실행한 통합 테스트 결과는 없다."
+      }
+    ],
+    "links": [
+      {
+        "event_id": "backend-search",
+        "story_key": "backend"
+      },
+      {
+        "event_id": "android-search",
+        "story_key": "android"
+      },
+      {
+        "event_id": "log-config",
+        "story_key": "backend"
+      }
+    ]
+  },
+  "mock_corrected": {
+    "title": "Android·Backend 검색과 별도 설정 변경",
+    "claims": [
+      {
+        "id": "claim-backend",
+        "question_id": "backend",
+        "text": "Backend 검색 API에 q 필터를 추가했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "api"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-android",
+        "question_id": "android",
+        "text": "Android 검색 입력을 q 파라미터에 연결했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "app",
+          "app-diff"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-separate",
+        "question_id": "separate",
+        "text": "같은 설정 파일의 로그 수준 변경은 별도 로깅 작업이다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "logs"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-integration",
+        "question_id": "integration",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "양쪽을 함께 실행한 통합 테스트 결과는 없다."
+      }
+    ],
+    "links": [
+      {
+        "event_id": "backend-search",
+        "story_key": "search"
+      },
+      {
+        "event_id": "android-search",
+        "story_key": "search"
+      },
+      {
+        "event_id": "log-config",
+        "story_key": "logging"
+      }
+    ]
+  }
+}

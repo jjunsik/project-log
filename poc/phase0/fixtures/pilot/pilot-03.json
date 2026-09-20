@@ -1,0 +1,257 @@
+{
+  "id": "pilot-03",
+  "project_key": "synthetic-project-3",
+  "title": "빈 입력 평균 계산의 실패와 수정",
+  "purpose": "최초 실패·코드 변경·재검증을 구분합니다.",
+  "repositories": [
+    "backend"
+  ],
+  "questions": [
+    {
+      "id": "initial",
+      "label": "최초 실행 결과는?"
+    },
+    {
+      "id": "implementation",
+      "label": "무엇을 수정했나?"
+    },
+    {
+      "id": "final",
+      "label": "재검증 결과는?"
+    },
+    {
+      "id": "prediction",
+      "label": "문제를 사전에 예상했나?"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "first",
+      "repository_key": "backend",
+      "source_type": "TEST",
+      "locator": "synthetic/backend/first",
+      "content": "{\"command\": [\"python\", \"-c\", \"values=[]; print(sum(values)/len(values))\"], \"python_version\": \"3.13.5\", \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\n  File \\\"<string>\\\", line 1, in <module>\\n    values=[]; print(sum(values)/len(values))\\n                     ~~~~~~~~~~~^~~~~~~~~~~~\\nZeroDivisionError: division by zero\\n\"}",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Actual failing execution on synthetic code; intentional failure."
+    },
+    {
+      "id": "diff",
+      "repository_key": "backend",
+      "source_type": "GIT_DIFF",
+      "locator": "synthetic/backend/diff",
+      "content": "-return sum(values)/len(values)\n+return sum(values)/len(values) if values else None",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "rerun",
+      "repository_key": "backend",
+      "source_type": "TEST",
+      "locator": "synthetic/backend/rerun",
+      "content": "{\"command\": [\"python\", \"-c\", \"mean=lambda v:sum(v)/len(v) if v else None; assert mean([]) is None; assert mean([2,4])==3; print('2 assertions: PASS')\"], \"python_version\": \"3.13.5\", \"exit_code\": 0, \"stdout\": \"2 assertions: PASS\\n\", \"stderr\": \"\"}",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Actual successful synthetic execution. Does not prove all inputs."
+    }
+  ],
+  "events": [
+    {
+      "id": "failure",
+      "evidence_ids": [
+        "first"
+      ]
+    },
+    {
+      "id": "fix",
+      "evidence_ids": [
+        "diff",
+        "rerun"
+      ]
+    }
+  ],
+  "golden_candidate": {
+    "draft": {
+      "title": "빈 입력 평균 계산의 실패와 수정",
+      "claims": [
+        {
+          "id": "claim-initial",
+          "question_id": "initial",
+          "text": "빈 입력의 평균 계산 실행이 ZeroDivisionError로 실패했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "first"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-implementation",
+          "question_id": "implementation",
+          "text": "빈 입력이면 None을 반환하는 분기를 추가했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "diff"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-final",
+          "question_id": "final",
+          "text": "빈 입력과 [2,4]에 대한 두 assertion이 재실행에서 통과했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "rerun"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-prediction",
+          "question_id": "prediction",
+          "text": null,
+          "evidence_status": "UNKNOWN",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [],
+          "unknown_reason": "사전 예측 여부를 보여주는 기록이 없다."
+        }
+      ],
+      "links": [
+        {
+          "event_id": "failure",
+          "story_key": "empty-input"
+        },
+        {
+          "event_id": "fix",
+          "story_key": "empty-input"
+        }
+      ]
+    },
+    "important_question_ids": [
+      "initial",
+      "implementation",
+      "final"
+    ],
+    "forbidden_claims": [
+      "모든 입력의 정확성이 증명됨",
+      "개발자가 사전에 실패를 예상함"
+    ],
+    "annotation_notes": "AI-authored candidate. Human approval pending. Questions define a bounded pilot; this is not open-domain extraction coverage."
+  },
+  "mock_initial": {
+    "title": "빈 입력 평균 계산의 실패와 수정",
+    "claims": [
+      {
+        "id": "claim-initial",
+        "question_id": "initial",
+        "text": "빈 입력의 평균 계산 실행이 ZeroDivisionError로 실패했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "first"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-implementation",
+        "question_id": "implementation",
+        "text": "빈 입력이면 None을 반환하는 분기를 추가했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "diff"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-final",
+        "question_id": "final",
+        "text": "빈 입력과 [2,4]에 대한 두 assertion이 재실행에서 통과했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "rerun"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-prediction",
+        "question_id": "prediction",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "사전 예측 여부를 보여주는 기록이 없다."
+      }
+    ],
+    "links": [
+      {
+        "event_id": "failure",
+        "story_key": "empty-input"
+      },
+      {
+        "event_id": "fix",
+        "story_key": "empty-input"
+      }
+    ]
+  },
+  "mock_corrected": {
+    "title": "빈 입력 평균 계산의 실패와 수정",
+    "claims": [
+      {
+        "id": "claim-initial",
+        "question_id": "initial",
+        "text": "빈 입력의 평균 계산 실행이 ZeroDivisionError로 실패했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "first"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-implementation",
+        "question_id": "implementation",
+        "text": "빈 입력이면 None을 반환하는 분기를 추가했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "diff"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-final",
+        "question_id": "final",
+        "text": "빈 입력과 [2,4]에 대한 두 assertion이 재실행에서 통과했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "rerun"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-prediction",
+        "question_id": "prediction",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "사전 예측 여부를 보여주는 기록이 없다."
+      }
+    ],
+    "links": [
+      {
+        "event_id": "failure",
+        "story_key": "empty-input"
+      },
+      {
+        "event_id": "fix",
+        "story_key": "empty-input"
+      }
+    ]
+  }
+}

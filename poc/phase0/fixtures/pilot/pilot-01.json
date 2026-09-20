@@ -1,0 +1,229 @@
+{
+  "id": "pilot-01",
+  "project_key": "synthetic-project-1",
+  "title": "태그 중복 제거",
+  "purpose": "의도·코드·실행 결과의 근거를 구분합니다.",
+  "repositories": [
+    "backend"
+  ],
+  "questions": [
+    {
+      "id": "intent",
+      "label": "변경 목적은 무엇인가?"
+    },
+    {
+      "id": "implementation",
+      "label": "무엇이 변경되었나?"
+    },
+    {
+      "id": "verification",
+      "label": "어떤 검증이 실행되었나?"
+    },
+    {
+      "id": "alternative",
+      "label": "검토한 대안이 있는가?"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "request",
+      "repository_key": "backend",
+      "source_type": "CODEX_USER",
+      "locator": "synthetic/backend/request",
+      "content": "사용자: 같은 태그가 중복 저장되지 않게 해줘. 입력 순서는 유지해줘.",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "diff",
+      "repository_key": "backend",
+      "source_type": "GIT_DIFF",
+      "locator": "synthetic/backend/diff",
+      "content": "-return tags\n+return list(dict.fromkeys(tags))",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Authored synthetic evidence; not an actual historical project artifact."
+    },
+    {
+      "id": "test",
+      "repository_key": "backend",
+      "source_type": "TEST",
+      "locator": "synthetic/backend/test",
+      "content": "{\"command\": [\"python\", \"-c\", \"tags=['ai','python','ai']; result=list(dict.fromkeys(tags)); assert result==['ai','python']; print('deduplicate and preserve order: PASS')\"], \"python_version\": \"3.13.5\", \"exit_code\": 0, \"stdout\": \"deduplicate and preserve order: PASS\\n\", \"stderr\": \"\"}",
+      "occurred_at": "2026-01-01T10:00:00Z",
+      "synthetic": true,
+      "provenance_note": "Actual Python execution on synthetic input. No performance benchmark."
+    }
+  ],
+  "events": [
+    {
+      "id": "change",
+      "evidence_ids": [
+        "request",
+        "diff",
+        "test"
+      ]
+    }
+  ],
+  "golden_candidate": {
+    "draft": {
+      "title": "태그 중복 제거",
+      "claims": [
+        {
+          "id": "claim-intent",
+          "question_id": "intent",
+          "text": "태그 중복을 제거하면서 입력 순서를 유지하려고 요청했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_DECISION",
+          "evidence_ids": [
+            "request"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-implementation",
+          "question_id": "implementation",
+          "text": "dict.fromkeys를 사용해 태그 중복을 제거했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "diff"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-verification",
+          "question_id": "verification",
+          "text": "합성 입력의 중복 제거와 순서 유지 assertion이 통과했다.",
+          "evidence_status": "CONFIRMED",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [
+            "test"
+          ],
+          "unknown_reason": null
+        },
+        {
+          "id": "claim-alternative",
+          "question_id": "alternative",
+          "text": null,
+          "evidence_status": "UNKNOWN",
+          "record_kind": "HISTORICAL_FACT",
+          "evidence_ids": [],
+          "unknown_reason": "당시 검토한 대안은 제공된 기록에 없다."
+        }
+      ],
+      "links": [
+        {
+          "event_id": "change",
+          "story_key": "dedup"
+        }
+      ]
+    },
+    "important_question_ids": [
+      "intent",
+      "implementation",
+      "verification"
+    ],
+    "forbidden_claims": [
+      "성능 개선 수치",
+      "set과 비교 실험했다는 주장"
+    ],
+    "annotation_notes": "AI-authored candidate. Human approval pending. Questions define a bounded pilot; this is not open-domain extraction coverage."
+  },
+  "mock_initial": {
+    "title": "태그 중복 제거",
+    "claims": [
+      {
+        "id": "claim-intent",
+        "question_id": "intent",
+        "text": "태그 중복을 제거하면서 입력 순서를 유지하려고 요청했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_DECISION",
+        "evidence_ids": [
+          "request"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-implementation",
+        "question_id": "implementation",
+        "text": "dict.fromkeys를 사용해 태그 중복을 제거했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "diff"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-alternative",
+        "question_id": "alternative",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "당시 검토한 대안은 제공된 기록에 없다."
+      }
+    ],
+    "links": [
+      {
+        "event_id": "change",
+        "story_key": "dedup"
+      }
+    ]
+  },
+  "mock_corrected": {
+    "title": "태그 중복 제거",
+    "claims": [
+      {
+        "id": "claim-intent",
+        "question_id": "intent",
+        "text": "태그 중복을 제거하면서 입력 순서를 유지하려고 요청했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_DECISION",
+        "evidence_ids": [
+          "request"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-implementation",
+        "question_id": "implementation",
+        "text": "dict.fromkeys를 사용해 태그 중복을 제거했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "diff"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-verification",
+        "question_id": "verification",
+        "text": "합성 입력의 중복 제거와 순서 유지 assertion이 통과했다.",
+        "evidence_status": "CONFIRMED",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [
+          "test"
+        ],
+        "unknown_reason": null
+      },
+      {
+        "id": "claim-alternative",
+        "question_id": "alternative",
+        "text": null,
+        "evidence_status": "UNKNOWN",
+        "record_kind": "HISTORICAL_FACT",
+        "evidence_ids": [],
+        "unknown_reason": "당시 검토한 대안은 제공된 기록에 없다."
+      }
+    ],
+    "links": [
+      {
+        "event_id": "change",
+        "story_key": "dedup"
+      }
+    ]
+  }
+}
