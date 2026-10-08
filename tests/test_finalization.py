@@ -1,14 +1,206 @@
 import base64
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
+from project_log.api import create_app
+from project_log.collector import collect
 from project_log.db import Database
+from project_log.git import CollectionError
+from project_log.policy import MAX_BODY
+from project_log.service import Settings
 from scripts.verification_db import temporary_database
+from tests.test_collection import commit, register
+
+
+def finish(db, cid):
+    collect(db, cid, lambda: False)
+    result = db.detail(cid)
+    assert result["state"] == "completed", result["issues"]
+    return result
+
+
+def observe(db, projects, pid):
+    row = projects.collect_now(pid)
+    return finish(db, str(row["id"]))
+
+
+def inventory(db, cid):
+    return {
+        (r["layer"], r["metadata"]["path"], r["metadata"].get("stage", 0)): r
+        for r in db.all("SELECT * FROM working_records WHERE collection_id=%s", (cid,))
+    }
+
+
+def storage_counts(db):
+    return {
+        table: db.one(f"SELECT count(*) AS n FROM {table}")["n"]
+        for table in ("contents", "git_commits", "git_changes", "git_files")
+    }
+
+
+def test_branch_reset_reobserves_all_current_refs_not_head_delta(db, git, tmp_path):
+    root = tmp_path / "repo"
+    first_oid = commit(git, root, "a", "first\n", "first")
+    projects, cid = register(db, root)
+    finish(db, cid)
+    pid = str(db.detail(cid)["project_id"])
+    git("checkout", "-b", "side")
+    side = commit(git, root, "b", "side\n", "side")
+    projects.update(pid, Settings(name="Test", status="ongoing", base_branch="side"))
+    second = observe(db, projects, pid)
+    assert second["snapshot"]["branch"] == "side"
+    git("checkout", "main")
+    projects.update(pid, Settings(name="Test", status="ongoing", base_branch="main"))
+    git("branch", "-D", "side")
+    third = observe(db, projects, pid)
+    assert third["snapshot"]["head"] == first_oid
+    assert third["snapshot"]["branch"] == "main"
+    assert {
+        r["oid"] for r in db.all("SELECT oid FROM commits WHERE collection_id=%s", (third["id"],))
+    } == {first_oid}
+    assert side in {
+        r["oid"] for r in db.all("SELECT oid FROM commits WHERE collection_id=%s", (second["id"],))
+    }
+
+
+def test_safe_untracked_all_text_configs_secrets_and_read_failure(db, git, tmp_path):
+    root = tmp_path / "repo"
+    bodies = {
+        "application.yml": b"server:\n  port: 8080\n",
+        "application.properties": b"server.port=8080\n",
+        "unknown.extension": b"general text\n",
+        "bad.yml": b"password: syntheticPrivate123456\n",
+        "hardcoded.py": b'api_key = "syntheticSecret123456789"\n',
+        ".env": b"sensitive even without a recognizable credential\n",
+        "binary": b"a\0b",
+        "encoding": b"\xff\xfe",
+        "large": b"x" * (MAX_BODY + 1),
+    }
+    for path, raw in bodies.items():
+        (root / path).write_bytes(raw)
+    (root / ".gitignore").write_text("ignored/\n")
+    (root / "ignored").mkdir()
+    (root / "ignored/private.txt").write_text("must not recurse\n")
+    (tmp_path / "outside").write_text("must not follow\n")
+    (root / "link").symlink_to(tmp_path / "outside")
+    unreadable = root / "unreadable.txt"
+    unreadable.write_text("not readable\n")
+    unreadable.chmod(0)
+    try:
+        _, cid = register(db, root)
+        collect(db, cid, lambda: False)
+    finally:
+        unreadable.chmod(0o600)
+    rows = inventory(db, cid)
+    for path in ("application.yml", "application.properties", "unknown.extension"):
+        row = rows[("untracked", path, 0)]
+        assert bytes(row["body"]) == bodies[path]
+        assert row["sha256"] == hashlib.sha256(bodies[path]).hexdigest()
+    expected = {
+        "bad.yml": "suspected_secret",
+        "hardcoded.py": "suspected_secret",
+        ".env": "sensitive_path",
+        "binary": "binary",
+        "encoding": "non_utf8",
+        "large": "large",
+        "link": "symlink",
+        "unreadable.txt": "unreadable_or_symlink_parent",
+    }
+    for path, reason in expected.items():
+        row = rows[("untracked", path, 0)]
+        assert row["body_reason"] == reason
+        assert row["body"] is None and row["sha256"] is None and row["content_id"] is None
+    assert not any(key[1].endswith("private.txt") for key in rows)
+    assert rows[("ignored", "ignored/", 0)]["body"] is None
+    result = db.detail(cid)
+    assert result["state"] == "cleanup_pending"
+    assert result["summary"]["errors"] == 1
+    assert {r["reason"] for r in result["summary"]["body_errors"]} == {
+        "unreadable_or_symlink_parent"
+    }
+    assert "suspected_secret" in {r["reason"] for r in result["summary"]["body_exclusions"]}
+    stored = [bytes(r["body"]) for r in db.all("SELECT body FROM contents")]
+    assert bodies["bad.yml"] not in stored and bodies["hardcoded.py"] not in stored
+
+
+@pytest.mark.parametrize("state", ["capturing", "queued", "running"])
+def test_active_slot_rejects_manual_and_has_no_retry_endpoint(db, git, tmp_path, state):
+    projects, old = register(db, tmp_path / "repo")
+    finish(db, old)
+    pid = str(db.detail(old)["project_id"])
+    active = projects.collect_now(pid)
+    db.execute("UPDATE collections SET state=%s WHERE id=%s", (state, active["id"]))
+    with TestClient(create_app(db, start_worker=False)) as client:
+        assert client.post(f"/api/projects/{pid}/collections", json={}).status_code == 409
+        assert client.post(f"/api/collections/{old}/retry", json={}).status_code in {404, 405}
+    assert db.one("SELECT count(*) AS n FROM collections WHERE project_id=%s", (pid,))["n"] == 2
+
+
+@pytest.mark.parametrize("actions", [("manual", "manual")])
+def test_concurrent_manual_requests_share_one_active_slot(db, git, tmp_path, actions):
+    projects, old = register(db, tmp_path / "repo")
+    finish(db, old)
+    pid = str(db.detail(old)["project_id"])
+    barrier = threading.Barrier(2)
+
+    def start(action):
+        barrier.wait(timeout=10)
+        try:
+            return projects.collect_now(pid)
+        except CollectionError as exc:
+            assert exc.code == "conflict"
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(start, action) for action in actions]
+        results = [f.result(timeout=20) for f in futures]
+    assert sum(r is not None for r in results) == 1
+    assert (
+        db.one(
+            "SELECT count(*) AS n FROM collections WHERE state IN ('capturing','queued','running')"
+        )["n"]
+        == 1
+    )
+
+
+def test_manual_keeps_completed_old_bytes_and_gets_current_bytes(db, git, tmp_path):
+    root = tmp_path / "repo"
+    (root / "a.txt").write_text("original observation\n")
+    projects, old = register(db, root)
+    finish(db, old)
+    pid = str(db.detail(old)["project_id"])
+    original = inventory(db, old)
+    (root / "a.txt").write_text("current observation\n")
+    manual = projects.collect_now(pid)
+    finish(db, str(manual["id"]))
+    assert inventory(db, old) == original
+    current = inventory(db, str(manual["id"]))
+    assert bytes(current[("untracked", "a.txt", 0)]["body"]) == b"current observation\n"
+    assert manual["kind"] == "manual"
+
+
+def test_collection_target_files_index_head_refs_unchanged(db, git, tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path("scripts").resolve()))
+    from scripts.verify_repository import fingerprint
+
+    root = tmp_path / "repo"
+    commit(git, root, "tracked", "base\n", "base")
+    (root / "tracked").write_text("dirty\n")
+    (root / "new").write_text("safe untracked\n")
+    before = fingerprint(root)
+    projects, cid = register(db, root)
+    finish(db, cid)
+    assert fingerprint(root) == before
+    observe(db, projects, str(db.detail(cid)["project_id"]))
+    assert fingerprint(root) == before
 
 
 def test_upgrade_001_preserves_records_bodies_times_and_is_idempotent():
@@ -121,3 +313,79 @@ def test_upgrade_001_preserves_records_bodies_times_and_is_idempotent():
                 "INSERT INTO contents(project_id,sha256,body) VALUES (%s,'wrong',%s)",
                 (project, b"raw"),
             )
+
+
+@pytest.mark.parametrize("limit", ["bytes", "seconds"])
+def test_untracked_snapshot_limit_keeps_metadata_and_explicit_failure(
+    db, git, tmp_path, monkeypatch, limit
+):
+    import project_log.collector as collector
+
+    root = tmp_path / "repo"
+    (root / "candidate.data").write_bytes(b"safe general text\r\n")
+    monkeypatch.setattr(collector, "SNAPSHOT_BYTES" if limit == "bytes" else "SNAPSHOT_SECONDS", 0)
+    _, cid = register(db, root)
+    collect(db, cid, lambda: False)
+    result = db.detail(cid)
+    row = db.one("SELECT * FROM working_records WHERE collection_id=%s", (cid,))
+    assert row["layer"] == "untracked" and row["metadata"]["path"] == "candidate.data"
+    assert row["body_reason"] == "snapshot_budget"
+    assert row["body"] is None and row["sha256"] is None and row["content_id"] is None
+    assert result["state"] == "cleanup_pending" and not result["snapshot"]["complete"]
+    assert result["summary"]["body_errors"] == [{"reason": "snapshot_budget", "count": 1}]
+    assert result["summary"]["body_exclusions"] == []
+
+
+def test_migration_checksum_mismatch_is_rejected_without_ledger_or_data_changes(db, git, tmp_path):
+    root = tmp_path / "repo"
+    (root / "untracked.txt").write_text("preserve\n")
+    _, cid = register(db, root)
+    finish(db, cid)
+    before = db.all("SELECT * FROM working_records ORDER BY id")
+    db.execute(
+        "UPDATE schema_migrations SET sha256='synthetic-mismatch' WHERE version=%s",
+        ("002_collection_content.sql",),
+    )
+    ledger = db.all("SELECT * FROM schema_migrations ORDER BY version")
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        db.migrate()
+    assert db.all("SELECT * FROM schema_migrations ORDER BY version") == ledger
+    assert db.all("SELECT * FROM working_records ORDER BY id") == before
+
+
+def test_database_rejects_cross_project_content_and_second_active_slot(db, git, tmp_path):
+    from uuid import uuid4
+
+    root = tmp_path / "repo"
+    (root / "a.txt").write_text("local Evidence\n")
+    _, cid = register(db, root)
+    finish(db, cid)
+    local = db.one("SELECT * FROM working_entries WHERE collection_id=%s", (cid,))
+    other = str(uuid4())
+    with db.connect() as conn:
+        conn.execute(
+            """INSERT INTO projects
+            (id,name,path,repository_key,status,coding_agent,repository_info)
+            VALUES (%s,'other','/synthetic-other','/synthetic-other/.git','new','none','{}')""",
+            (other,),
+        )
+        content = conn.execute(
+            """INSERT INTO contents(project_id,sha256,body)
+            VALUES (%s,%s,%s) RETURNING id""",
+            (other, hashlib.sha256(b"other Evidence\n").hexdigest(), b"other Evidence\n"),
+        ).fetchone()
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        db.execute(
+            "UPDATE working_entries SET content_id=%s WHERE id=%s", (content["id"], local["id"])
+        )
+    assert (
+        db.one("SELECT content_id FROM working_entries WHERE id=%s", (local["id"],))["content_id"]
+        == local["content_id"]
+    )
+    db.execute("UPDATE collections SET state='queued' WHERE id=%s", (cid,))
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        db.execute(
+            "INSERT INTO collections(id,project_id,state,policy) VALUES (%s,%s,'capturing','{}')",
+            (str(uuid4()), local["project_id"]),
+        )
+    assert db.one("SELECT count(*) AS n FROM collections")["n"] == 1
