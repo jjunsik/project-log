@@ -233,3 +233,109 @@ test.describe('legacy project configuration', () => {
     expect((await (await request.get(`/api/collections/${before.collections[0].id}`)).json()).snapshot).toEqual({});
   });
 });
+
+
+
+test('drop and chooser share first-failure policy, reject actual folders and report all unuploaded names', async ({page, request, backend}) => {
+  await page.goto('/');
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'empty-repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('start/here');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const [project] = await (await request.get('/api/projects')).json();
+  const section = page.getByRole('region', {name: '사용자 추가 자료', exact: true});
+  await expect(section.getByRole('button', {name: '파일 추가', exact: true})).toBeEnabled();
+  const attempted: string[] = [];
+  page.on('request', req => {if (req.method() === 'PUT') attempted.push(decodeURIComponent(req.headers()['x-file-name']));});
+  await section.locator('.material-drop').evaluate(node => {
+    const transfer = new DataTransfer();
+    for (const [name, text] of [['A.txt', 'alpha'], ['B.md', 'beta'], ['C.exe', 'unsupported'], ['D.txt', 'delta'], ['E.md', 'echo']]) transfer.items.add(new File([text], name));
+    node.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: transfer}));
+  });
+  await expect(section.locator('.upload-failure')).toContainText('C.exe: 지원하지 않는 파일 형식');
+  await expect(section.locator('.upload-failure li')).toHaveText(['C.exe', 'D.txt', 'E.md']);
+  await expect(section.locator('.material-list li')).toHaveCount(2);
+  expect(attempted).toEqual(['A.txt', 'B.md', 'C.exe']);
+  let rows = await (await request.get(`/api/projects/${project.id}/materials`)).json();
+  expect(rows.map((r: {filename: string}) => r.filename)).toEqual(['B.md', 'A.txt']);
+  expect(readdirSync(join(backend, 'storage/materials', project.id)).sort()).toEqual(rows.map((r: {id: string}) => r.id).sort());
+  expect(readdirSync(join(backend, 'storage/.tmp'))).toEqual([]);
+  await expect(section.getByRole('button', {name: '파일 추가', exact: true})).toBeEnabled();
+  await section.getByLabel('추가할 파일').setInputFiles([
+    {name: 'first.txt', mimeType: 'text/plain', buffer: Buffer.from('first')},
+    {name: 'renamed.txt', mimeType: 'text/plain', buffer: Buffer.from('alpha')},
+    {name: 'later.md', mimeType: 'text/markdown', buffer: Buffer.from('later')},
+  ]);
+  await expect(section.locator('.upload-failure')).toContainText('renamed.txt: 동일한 내용');
+  await expect(section.locator('.upload-failure li')).toHaveText(['renamed.txt', 'later.md']);
+  await expect(section.locator('.material-list li')).toHaveCount(3);
+  await expect(section.getByRole('button', {name: '파일 추가', exact: true})).toBeEnabled();
+  await section.locator('.material-drop').evaluate(node => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['different'], 'a.TXT'));
+    transfer.items.add(new File(['skipped'], 'after.md'));
+    node.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: transfer}));
+  });
+  await expect(section.locator('.upload-failure')).toContainText('a.TXT: 같은 파일명이 있습니다');
+  await expect(section.locator('.upload-failure')).toContainText('원본 파일명을 변경한 뒤');
+  await expect(section.locator('.upload-failure li')).toHaveText(['a.TXT', 'after.md']);
+  await expect(section.getByRole('button', {name: '파일 추가', exact: true})).toBeEnabled();
+  const folder = join(backend, 'folder'); mkdirSync(folder); writeFileSync(join(folder, 'inside.txt'), 'never upload');
+  // CDP supplies a real filesystem directory, exercising Chromium's isDirectory entry.
+  await section.locator('.material-drop').scrollIntoViewIfNeeded();
+  const box = (await section.locator('.material-drop').boundingBox())!;
+  const session = await page.context().newCDPSession(page);
+  for (const type of ['dragEnter', 'dragOver', 'drop'] as const) await session.send('Input.dispatchDragEvent', {
+    type, x: box.x + 20, y: box.y + 20, data: {items: [], files: [folder], dragOperationsMask: 1},
+  });
+  await session.detach();
+  await expect(section.locator('.upload-failure')).toContainText('folder: 폴더 업로드는 지원하지 않습니다');
+  await expect(section.locator('.upload-failure li')).toHaveText(['folder']);
+  rows = await (await request.get(`/api/projects/${project.id}/materials`)).json();
+  expect(rows).toHaveLength(3);
+  expect(readFileSync(join(folder, 'inside.txt'), 'utf8')).toBe('never upload');
+  await expect(section.getByRole('button', {name: '파일 추가', exact: true})).toBeEnabled();
+  await section.getByLabel('추가할 파일').setInputFiles([
+    {name: 'large.txt', mimeType: 'text/plain', buffer: Buffer.alloc(20 * 1024 * 1024 + 1, 'x')},
+    {name: 'after-large.md', mimeType: 'text/markdown', buffer: Buffer.from('never')},
+  ]);
+  await expect(section.locator('.upload-failure')).toContainText('large.txt: 파일 크기 제한');
+  await expect(section.locator('.upload-failure li')).toHaveText(['large.txt', 'after-large.md']);
+  expect(await (await request.get(`/api/projects/${project.id}/materials`)).json()).toHaveLength(3);
+});
+
+test('real storage failure keeps earlier batch success and cleans failed bytes', async ({page, request, backend}) => {
+  await page.goto('/');
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'empty-repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('start/here');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const [project] = await (await request.get('/api/projects')).json();
+  const section = page.getByRole('region', {name: '사용자 추가 자료', exact: true});
+  await expect(section.getByRole('button', {name: '파일 추가', exact: true})).toBeEnabled();
+  const staged = join(backend, 'storage/.tmp');
+  const attempts: string[] = [];
+  await page.route(`**/api/projects/${project.id}/materials`, async route => {
+    if (route.request().method() === 'PUT') {
+      const name = decodeURIComponent(route.request().headers()['x-file-name']); attempts.push(name);
+      if (name === 'C.txt') {
+        expect(readdirSync(staged)).toEqual([]);
+        renameSync(staged, staged + '-owned-fixture');
+        writeFileSync(staged, 'synthetic storage blocker');
+      }
+    }
+    await route.continue();
+  });
+  await section.getByLabel('추가할 파일').setInputFiles(['A.txt', 'B.md', 'C.txt', 'D.md', 'E.csv'].map((name, i) => ({name, mimeType: 'text/plain', buffer: Buffer.from(`distinct-${i}`)})));
+  await expect(section.locator('.upload-failure')).toContainText('C.txt: 보관 사본 저장에 실패했습니다');
+  await expect(section.locator('.upload-failure li')).toHaveText(['C.txt', 'D.md', 'E.csv']);
+  await expect(section.locator('.material-list li')).toHaveCount(2);
+  expect(attempts).toEqual(['A.txt', 'B.md', 'C.txt']);
+  const rows = await (await request.get(`/api/projects/${project.id}/materials`)).json();
+  expect(rows.map((r: {filename: string}) => r.filename)).toEqual(['B.md', 'A.txt']);
+  expect(readdirSync(join(backend, 'storage/materials', project.id)).sort()).toEqual(rows.map((r: {id: string}) => r.id).sort());
+  expect(readdirSync(staged + '-owned-fixture')).toEqual([]);
+  for (const row of rows) expect((await request.get(`/api/projects/${project.id}/materials/${row.id}/file`)).ok()).toBe(true);
+  // Restore only this test-owned injected blocker; no Product/user files are involved.
+  unlinkSync(staged); renameSync(staged + '-owned-fixture', staged);
+});

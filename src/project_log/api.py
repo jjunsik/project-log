@@ -3,11 +3,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote_to_bytes
 from uuid import UUID
 
 import psycopg
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
@@ -15,6 +16,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from project_log.db import RECORDS, Database, Row
 from project_log.git import CollectionError, diagnose
+from project_log.materials import FORMATS, Materials
 from project_log.service import Projects, Registration, Settings
 from project_log.worker import Worker
 
@@ -28,9 +30,12 @@ def create_app(
     db: Database | None = None,
     *,
     start_worker: bool = True,
+    storage_root: Path | None = None,
+    material_max_bytes: int | None = None,
 ) -> FastAPI:
     database = db or Database()
     projects = Projects(database)
+    materials = Materials(database, storage_root, material_max_bytes)
     worker: Worker | None = None
 
     @asynccontextmanager
@@ -75,6 +80,11 @@ def create_app(
                 if len(chunks) > 16000:
                     return JSONResponse({"detail": "요청이 너무 큽니다."}, status_code=413)
             request._body = bytes(chunks)
+        if (
+            request.method == "PUT"
+            and request.headers.get("content-type") != "application/octet-stream"
+        ):
+            return JSONResponse({"detail": "파일 bytes 요청이 필요합니다."}, status_code=415)
         if request.url.path.startswith("/api/collections/") and request.method == "GET":
             parts = request.url.path.split("/")
             try:
@@ -157,7 +167,62 @@ def create_app(
 
     @app.post("/api/projects", status_code=201)
     def register(body: Registration) -> Row:
+        materials.check_repository(body.path)
         return projects.register(body)
+
+    @app.get("/api/material-policy")
+    def material_policy() -> Row:
+        return {"extensions": list(FORMATS), "max_bytes": materials.max_bytes}
+
+    @app.get("/api/projects/{project_id}/materials")
+    def material_list(project_id: UUID) -> list[Row]:
+        return materials.listing(str(project_id))
+
+    @app.put("/api/projects/{project_id}/materials", status_code=201)
+    async def add_material(project_id: UUID, request: Request) -> Row:
+        try:
+            filename = unquote_to_bytes(request.headers.get("x-file-name", "")).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CollectionError("invalid_filename", "파일명을 확인하세요.") from exc
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > materials.max_bytes:
+                raise CollectionError("file_too_large", "파일 크기 제한을 초과했습니다.")
+            raw.extend(chunk)
+        try:
+            return await run_in_threadpool(materials.add, str(project_id), filename, bytes(raw))
+        except OSError as exc:
+            raise CollectionError(
+                "storage_failed",
+                "보관 사본 저장에 실패했습니다. 로컬 저장 영역과 여유 공간을 확인하세요.",
+            ) from exc
+
+    @app.get("/api/projects/{project_id}/materials/{material_id}/file")
+    def material_file(project_id: UUID, material_id: UUID) -> Response:
+        try:
+            row, raw = materials.read(str(project_id), str(material_id))
+        except OSError as exc:
+            raise CollectionError(
+                "storage_failed", "보관 사본을 읽을 수 없습니다. 로컬 저장 영역을 확인하세요."
+            ) from exc
+        return Response(
+            raw,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": "attachment; filename=material; filename*=UTF-8''"
+                + quote(row["filename"], safe=""),
+            },
+        )
+
+    @app.delete("/api/projects/{project_id}/materials/{material_id}")
+    def delete_material(project_id: UUID, material_id: UUID) -> Row:
+        try:
+            materials.delete(str(project_id), str(material_id))
+        except OSError as exc:
+            raise CollectionError(
+                "storage_failed", "자료 삭제에 실패했습니다. 로컬 저장 영역을 확인하세요."
+            ) from exc
+        return {"deleted": str(material_id)}
 
     @app.get("/api/projects/{project_id}")
     def project(project_id: UUID) -> Row:

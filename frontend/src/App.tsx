@@ -1,4 +1,5 @@
 import {useEffect, useRef, useState} from 'react';
+import Materials from './Materials';
 import {api, ApiError, collectionLabels, collectionOption, collectionSelection, hasActiveCollection, suggestedName, statusLabels} from './model';
 import type {Collection, Project, ProjectStatus, Settings} from './model';
 
@@ -185,6 +186,7 @@ export default function App() {
 
           </>}
           {!collection && <div className="empty"><h3>{active ? '수집 자료 정리 중입니다' : '수집 기록이 없습니다'}</h3><p>{active ? '정리가 끝나면 새로 수집할 수 있습니다.' : '지금 수집으로 자료를 확보하세요.'}</p></div>}
+          <Materials key={project.id} projectId={project.id}/>
         </>}
       </section>
     </div>

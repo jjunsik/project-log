@@ -8,6 +8,12 @@ from project_log.db import Database
 from scripts.verification_db import temporary_database
 
 
+@pytest.fixture(autouse=True)
+def isolated_material_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PROJECT_LOG_STORAGE_ROOT", str(tmp_path / "material-storage"))
+    monkeypatch.delenv("PROJECT_LOG_MATERIAL_MAX_BYTES", raising=False)
+
+
 @pytest.fixture
 def db() -> Iterator[Database]:
     with temporary_database() as dsn:

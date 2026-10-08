@@ -43,6 +43,19 @@ make serve
 의존하는 것은 아니다. 다른 경로는 `make NODE_BIN=/절대/Node/bin …`으로 지정한다.
 Frontend 개발 서버는 `make dev-ui`이며 별도 Backend `make serve`가 필요하다.
 
+프로젝트 화면의 `사용자 추가 자료`에서 파일 선택 또는 drag & drop으로 여러 파일을 추가한다.
+UTF-8 텍스트/Markdown/로그/JSON/CSV, PDF/DOCX, PNG/JPEG를 지원하고 폴더는 지원하지 않는다.
+최근 추가 순으로 표시하며 파일명을 선택하면 보관 사본을 가져온다. 삭제는 확인 후 영구 삭제하며 복구 기능은 없다.
+같은 Project의 내용 중복·파일명 충돌을 거절한다. 충돌하면 PC 원본 이름을 바꿔 다시 추가한다.
+여러 파일 중 첫 실패에서 중단하고 앞선 성공은 유지한다. 실패 파일과 이후 미처리 파일은 `업로드되지 않음`에 표시한다.
+이 자료는 Project 소유이며 Collection 선택·수집량·증감과 독립이다. 내용 추출/OCR/AI 분석은 하지 않는다.
+
+원본 bytes의 사본은 기본 `$XDG_DATA_HOME/project-log`(미설정 시 `~/.local/share/project-log`)에 저장한다.
+`PROJECT_LOG_STORAGE_ROOT`로 관리 root를 변경할 수 있고 등록 Repository 내부 위치는 거절한다.
+PC의 원본 파일은 수정/이동/삭제하지 않으며 원본이 없어져도 보관 사본은 유지한다.
+기본 파일 한도 20 MiB는 `PROJECT_LOG_MATERIAL_MAX_BYTES`(bytes, 양의 정수)로 바꿀 수 있다.
+기존 사본의 저장 위치를 바꿀 때는 관리 root의 데이터도 함께 옮겨야 한다. DB와 관리 root를 함께 백업한다.
+
 기본 연결은 `127.0.0.1:5432 / project_log`, User는 현재 OS 사용자(현재 개발 환경은 `jjun`)다.
 Project Log 전용 PostgreSQL 서버를 생성·시작·종료하지 않는다. 기존 서버의 다른 DB는 변경하지 않는다.
 DB 존재·소유 확인 → migration/schema 적용 → 제품 실행 → Project 등록 순서로 사용한다.
