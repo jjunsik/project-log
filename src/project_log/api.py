@@ -241,6 +241,15 @@ def create_app(
     def collection(collection_id: UUID) -> Row:
         return database.detail(str(collection_id))
 
+    @app.post("/api/collections/{collection_id}/cancel", status_code=202)
+    def cancel(collection_id: UUID) -> Row:
+        return Collections(database).cancel(str(collection_id))
+
+    @app.delete("/api/collections/{collection_id}")
+    def delete_collection(collection_id: UUID) -> Row:
+        Collections(database).remove(str(collection_id))
+        return {"deleted": str(collection_id)}
+
     @app.patch("/api/collections/{collection_id}")
     def memo(collection_id: UUID, body: Memo) -> Row:
         return Collections(database).memo(str(collection_id), body)

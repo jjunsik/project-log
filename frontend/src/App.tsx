@@ -193,9 +193,22 @@ export default function App() {
               });}}><label>수집 제목<input maxLength={200} value={memo.title} onChange={e => setMemo({...memo, title: e.target.value})}/></label>
                 <label>수집 설명<textarea maxLength={4000} value={memo.description} onChange={e => setMemo({...memo, description: e.target.value})}/></label>
                 <button disabled={busy}>메모 저장</button></form>}
-
+              <button disabled={busy} onClick={() => {
+                if (!window.confirm('이 수집 기록과 전용 자료를 영구 삭제합니다. 복구할 수 없습니다. 삭제할까요?')) return;
+                void perform(async () => {
+                  await api(`collections/${collection.id}`, 'DELETE');
+                  const p = await api<Project>(`projects/${project.id}`); setProject(p); setCollection(null); setMemo(null);
+                  setSelectedCollection(collectionSelection(p.collections ?? [], selectedCollection)); setNotice('수집 기록을 삭제했습니다.');
+                });
+              }}>수집 기록 삭제</button>
             </section>}
-
+            {['capturing', 'queued', 'running'].includes(collection.state) && <button disabled={busy} onClick={() => {
+              if (!window.confirm('진행 중 수집을 취소하고 이번 수집 자료를 제거합니다. 취소 확정 후 철회할 수 없습니다. 취소할까요?')) return;
+              void perform(async () => {
+                await api(`collections/${collection.id}/cancel`, 'POST');
+                setProject(await api<Project>(`projects/${project.id}`)); setNotice('취소를 확정했습니다. 이번 수집 자료를 정리합니다.');
+              });
+            }}>수집 취소</button>}
           </>}
           {!collection && <div className="empty"><h3>{active ? '수집 자료 정리 중입니다' : '수집 기록이 없습니다'}</h3><p>{active ? '정리가 끝나면 새로 수집할 수 있습니다.' : '지금 수집으로 자료를 확보하세요.'}</p></div>}
           <Materials key={project.id} projectId={project.id}/>

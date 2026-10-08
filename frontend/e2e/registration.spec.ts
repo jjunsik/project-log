@@ -339,3 +339,128 @@ test('real storage failure keeps earlier batch success and cleans failed bytes',
   // Restore only this test-owned injected blocker; no Product/user files are involved.
   unlinkSync(staged); renameSync(staged + '-owned-fixture', staged);
 });
+
+
+test('collection memo, confirmation, selected and unselected deletion, empty state and materials', async ({page, request, backend}, testInfo) => {
+  await page.goto('/');
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('main');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const pid = (await (await request.get('/api/projects')).json())[0].id;
+  const first = (await (await request.get(`/api/projects/${pid}`)).json()).collections[0];
+  await expect(page.getByLabel('수집 기록', {exact: true})).toContainText('main · 수집 완료');
+  await expect(page.locator('.metadata')).toContainText('수집 날짜/시간');
+  await expect(page.locator('.metadata')).toContainText('수집 상태');
+  await page.getByRole('button', {name: '제목·설명 편집'}).click();
+  await page.getByLabel('수집 제목', {exact: true}).fill('프로젝트 기본 틀 완성');
+  await page.getByLabel('수집 설명', {exact: true}).fill('개인 메모\n상황 기록');
+  await page.getByRole('button', {name: '메모 저장'}).click();
+  await expect(page.getByLabel('수집 기록', {exact: true}).locator('option:checked')).toHaveText('프로젝트 기본 틀 완성');
+  await expect(page.locator('.memo-description')).toHaveText('개인 메모\n상황 기록');
+  await expect(page.getByLabel('수집 기록', {exact: true})).not.toContainText('개인 메모');
+  await page.reload();
+  await page.getByRole('button', {name: /repo.*개발 중/}).click();
+  await expect(page.locator('.memo-description')).toContainText('상황 기록');
+  await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+  await expect(page.locator('.collection-state')).toContainText('현재 시점의 수동 수집');
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const second = (await (await request.get(`/api/projects/${pid}`)).json()).collections[0];
+  await page.getByRole('button', {name: '제목·설명 편집'}).click();
+  await page.getByLabel('수집 제목', {exact: true}).fill('프로젝트 기본 틀 완성');
+  await page.getByRole('button', {name: '메모 저장'}).click();
+  await expect(page.getByLabel('수집 기록', {exact: true}).locator('option')).toHaveCount(2);
+  // Removing a non-selected record through the same real API preserves selection.
+  expect((await request.delete(`/api/collections/${first.id}`)).ok()).toBe(true);
+  await expect(page.getByLabel('수집 기록', {exact: true}).locator('option')).toHaveCount(1);
+  await expect(page.getByLabel('수집 기록', {exact: true})).toHaveValue(second.id);
+  await page.getByRole('button', {name: '제목·설명 편집'}).click();
+  await page.getByLabel('수집 제목', {exact: true}).fill('');
+  await page.getByLabel('수집 설명', {exact: true}).fill('');
+  await page.getByRole('button', {name: '메모 저장'}).click();
+  await expect(page.getByLabel('수집 기록', {exact: true}).locator('option:checked')).toContainText('main · 수집 완료');
+  await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  await expect(page.getByLabel('수집 기록', {exact: true}).locator('option')).toHaveCount(2);
+  const latest = (await (await request.get(`/api/projects/${pid}`)).json()).collections[0];
+  await page.getByLabel('수집 기록', {exact: true}).selectOption(second.id);
+  let confirmations = 0;
+  page.once('dialog', async dialog => {confirmations++; expect(dialog.message()).toContain('영구 삭제'); await dialog.dismiss();});
+  await page.getByRole('button', {name: '수집 기록 삭제', exact: true}).click();
+  expect((await request.get(`/api/collections/${second.id}`)).ok()).toBe(true);
+  page.once('dialog', async dialog => {confirmations++; await dialog.accept();});
+  await page.getByRole('button', {name: '수집 기록 삭제', exact: true}).click();
+  await expect(page.getByLabel('수집 기록', {exact: true})).toHaveValue(latest.id);
+  const material = await request.put(`/api/projects/${pid}/materials`, {data: Buffer.from('Project material stays'), headers: {'Content-Type': 'application/octet-stream', 'X-File-Name': 'persistent.txt'}});
+  expect(material.ok()).toBe(true);
+  const mid = (await material.json()).id;
+  page.once('dialog', async dialog => {confirmations++; await dialog.accept();});
+  await page.getByRole('button', {name: '수집 기록 삭제', exact: true}).click();
+  await expect(page.getByRole('heading', {name: '수집 기록이 없습니다'})).toBeVisible();
+  await expect(page.getByLabel('수집 기록', {exact: true})).toHaveCount(0);
+  await expect(page.getByRole('button', {name: '지금 수집', exact: true})).toBeEnabled();
+  expect(confirmations).toBe(3);
+  expect(await (await request.get(`/api/projects/${pid}/materials/${mid}/file`)).text()).toBe('Project material stays');
+  expect((await (await request.get(`/api/projects/${pid}`)).json()).base_branch).toBe('main');
+  await page.screenshot({path: testInfo.outputPath('task5-empty-desktop.png'), fullPage: true});
+});
+
+test.describe('running collection cancellation', () => {
+  test.use({slow: true});
+  test('confirmation dismissal preserves collection, acceptance removes it and permits fresh collection', async ({page, request, backend}, testInfo) => {
+    await page.goto('/');
+    await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'repo'));
+    await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('main');
+    await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+    await expect(page.getByRole('button', {name: '수집 취소', exact: true})).toBeVisible();
+    const pid = (await (await request.get('/api/projects')).json())[0].id;
+    const cid = (await (await request.get(`/api/projects/${pid}`)).json()).collections[0].id;
+    page.once('dialog', async d => {expect(d.message()).toContain('철회할 수 없습니다'); await d.dismiss();});
+    await page.getByRole('button', {name: '수집 취소', exact: true}).click();
+    expect((await request.get(`/api/collections/${cid}`)).ok()).toBe(true);
+    page.once('dialog', async d => d.accept());
+    await page.getByRole('button', {name: '수집 취소', exact: true}).click();
+    await expect(page.getByRole('button', {name: '지금 수집', exact: true})).toBeDisabled();
+    await expect(page.getByRole('heading', {name: '수집 기록이 없습니다'})).toBeVisible();
+    expect((await request.get(`/api/collections/${cid}`)).status()).toBe(404);
+    await expect(page.getByRole('button', {name: '지금 수집', exact: true})).toBeEnabled();
+    await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+    await expect(page.locator('.collection-state')).toContainText('수집 완료', {timeout: 15_000});
+    const fresh = (await (await request.get(`/api/projects/${pid}`)).json()).collections;
+    expect(fresh).toHaveLength(1); expect(fresh[0].id).not.toBe(cid);
+    await page.getByRole('button', {name: '제목·설명 편집'}).click();
+    await page.getByLabel('수집 제목', {exact: true}).fill('다시 시작한 수집');
+    await page.getByLabel('수집 설명', {exact: true}).fill('취소 후 처음부터 수집했습니다.');
+    await page.getByRole('button', {name: '메모 저장'}).click();
+    await page.setViewportSize({width: 390, height: 844});
+    await page.screenshot({path: testInfo.outputPath('task5-memo-mobile.png'), fullPage: true});
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+});
+
+
+test('collection removed between polling list and detail selects remaining record without a stale error', async ({page, request, backend}) => {
+  await page.goto('/');
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('main');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const pid = (await (await request.get('/api/projects')).json())[0].id;
+  const first = (await (await request.get(`/api/projects/${pid}`)).json()).collections[0].id;
+  await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+  await expect(page.locator('.collection-state')).toContainText('현재 시점의 수동 수집');
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const second = (await (await request.get(`/api/projects/${pid}`)).json()).collections[0].id;
+  let removed = false;
+  await page.route(`**/api/collections/${second}`, async route => {
+    if (!removed) {
+      removed = true;
+      expect((await request.delete(`/api/collections/${second}`)).ok()).toBe(true);
+    }
+    await route.continue();
+  });
+  await expect(page.getByLabel('수집 기록', {exact: true})).toHaveValue(first);
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(removed).toBe(true);
+});

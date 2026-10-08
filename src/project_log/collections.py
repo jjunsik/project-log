@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 from project_log.db import Database, Row
 from project_log.git import CollectionError
 
+ACTIVE = {"capturing", "queued", "running"}
 CLEANUP = {"cancel_pending", "cleanup_pending", "partial", "failed"}
 
 
@@ -34,6 +35,15 @@ class Collections:
         if row is None:
             raise CollectionError("not_found", "수집 기록이 없습니다.")
         return row
+
+    def cancel(self, collection: str) -> Row:
+        with self.db.connect() as conn:
+            row = self._lock(conn, collection)
+            if row["state"] not in ACTIVE:
+                raise CollectionError("conflict", "진행 중인 수집만 취소할 수 있습니다.")
+            conn.execute("UPDATE collections SET state='cancel_pending' WHERE id=%s", (collection,))
+        # This committed intent is deliberately separate from removal.
+        return {"id": collection, "state": "cancel_pending"}
 
     def memo(self, collection: str, memo: Memo) -> Row:
         with self.db.connect() as conn:

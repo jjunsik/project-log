@@ -11,7 +11,16 @@ describe('application API failure and lifecycle contract', () => {
     )));
     await expect(api('projects', 'POST', {name: 'project'})).rejects.toThrow('이미 등록된 Repository');
   });
-
+  it('sends an empty cancellation as JSON accepted by the local request boundary', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({id: 'next', state: 'queued'}), {status: 202}));
+    vi.stubGlobal('fetch', fetch);
+    const result = await api<{id: string}>('collections/previous/cancel', 'POST');
+    expect(result.id).toBe('next');
+    const [url, request] = fetch.mock.calls[0];
+    expect(url).toBe('/api/collections/previous/cancel');
+    expect(request.headers['Content-Type']).toBe('application/json');
+    expect(JSON.parse(request.body)).toEqual({});
+  });
   it('sends manual collection to the Project endpoint without memo input', async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({id: 'next', kind: 'manual'}), {status: 202}));
     vi.stubGlobal('fetch', fetch);
