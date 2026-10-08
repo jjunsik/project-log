@@ -34,7 +34,12 @@ describe('application API failure and lifecycle contract', () => {
 
 
 
-
+it('uses only a title in select and keeps technical fallback without description', () => {
+  const c = {id: 'one', state: 'completed', created_at: '2026-10-07T00:00:00Z', snapshot: {branch: 'main'}, description: 'private memo'} as Collection;
+  expect(collectionOption({...c, title: '작업 기록'})).toBe('작업 기록');
+  expect(collectionOption(c)).toContain('main · 수집 완료');
+  expect(collectionOption(c)).not.toContain('private memo');
+});
 it('retains an existing selection, otherwise chooses newest completed or empty', () => {
   const cs = [{id: 'active', state: 'running'}, {id: 'new', state: 'completed'}, {id: 'old', state: 'completed'}] as Collection[];
   expect(collectionSelection(cs, 'old')).toBe('old');

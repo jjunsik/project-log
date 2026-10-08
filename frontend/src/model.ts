@@ -12,6 +12,7 @@ export interface Summary {
     new?: number; changed?: number; unchanged?: number; deleted?: number; unknown?: number};
 }
 export interface Collection {
+  title?: string | null; description?: string | null;
   id: string; state: CollectionState; created_at: string; finished_at: string | null;
   retry_of: string | null; summary: Summary;
   kind?: 'initial' | 'manual' | 'retry';
@@ -47,7 +48,7 @@ export async function api<T>(path: string, method = 'GET', body?: unknown, signa
 }
 
 export function collectionOption(c: Collection): string {
-  return `${new Date(c.created_at).toLocaleString('ko-KR')} · ${c.snapshot?.branch ?? '브랜치 미확보'} · ${collectionLabels[c.state]}`;
+  return c.title || `${new Date(c.created_at).toLocaleString('ko-KR')} · ${c.snapshot?.branch ?? '브랜치 미확보'} · ${collectionLabels[c.state]}`;
 }
 export function collectionSelection(collections: Collection[], selected: string): string {
   if (!selected) return collections[0]?.id ?? '';

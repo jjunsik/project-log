@@ -25,6 +25,7 @@ export default function App() {
   const [selectedCollection, setSelectedCollection] = useState('');
   const [project, setProject] = useState<Project | null>(null);
   const [collection, setCollection] = useState<Collection | null>(null);
+  const [memo, setMemo] = useState<{title: string; description: string} | null>(null);
   const [edit, setEdit] = useState<Settings | null>(null);
   const [error, setError] = useState('');
   const [pollError, setPollError] = useState('');
@@ -68,7 +69,7 @@ export default function App() {
     return () => {controller.abort(); clearTimeout(timer);};
   }, []);
 
-  useEffect(() => {setProject(null); setEdit(null); }, [selected]);
+  useEffect(() => {setProject(null); setEdit(null); setMemo(null);}, [selected]);
 
   useEffect(() => {
     if (!selected) return;
@@ -89,7 +90,7 @@ export default function App() {
             id = collectionSelection(p.collections ?? [], id);
           }
         }
-        if (!controller.signal.aborted) {setProject(p); setCollection(c); if (id !== selectedCollection) {setSelectedCollection(id); }}
+        if (!controller.signal.aborted) {setProject(p); setCollection(c); if (id !== selectedCollection) {setSelectedCollection(id); setMemo(null);}}
       } catch (e) { if (!controller.signal.aborted) setError(message(e)); }
       if (!controller.signal.aborted) timer = setTimeout(poll, 900);
     }
@@ -145,7 +146,7 @@ export default function App() {
           <button className="primary" disabled={busy || active || !project.base_branch} onClick={() => void perform(async () => {
             const c = await api<Collection | null>(`projects/${project.id}/collections`, 'POST');
             const p = await api<Project>(`projects/${project.id}`);
-            setProject(p); setCollection(c); setSelectedCollection(c?.id ?? collectionSelection(p.collections ?? [], selectedCollection));
+            setProject(p); setCollection(c); setSelectedCollection(c?.id ?? collectionSelection(p.collections ?? [], selectedCollection)); setMemo(null);
             setNotice(c ? '현재 상태의 새 수집을 시작했습니다. 이전 기록은 보존됩니다.' : '이번 수집이 중단되었습니다.');
           })}>지금 수집</button>
           {project.collections?.[0] && <p className="latest-collection" role="status">최신 수집: {date(project.collections[0].created_at)} · {collectionLabels[project.collections[0].state]}{active ? ' · 수집 또는 정리가 끝나면 다시 수집할 수 있습니다.' : ''}</p>}
@@ -154,7 +155,7 @@ export default function App() {
             setProjects(old => old.map(item => item.id === p.id ? {...item, name: p.name, status: p.status, base_branch: p.base_branch} : item));
             setEdit(null); setNotice('프로젝트 설정을 저장했습니다.');
           });}}><Fields value={edit} onChange={setEdit}/><button disabled={busy}>설정 저장</button></form>}
-          {project.collections && project.collections.length > 0 && <label>수집 기록<select aria-label="수집 기록" value={selectedCollection || project.collections[0].id} onChange={e => {setSelectedCollection(e.target.value); }}>
+          {project.collections && project.collections.length > 0 && <label>수집 기록<select aria-label="수집 기록" value={selectedCollection || project.collections[0].id} onChange={e => {setSelectedCollection(e.target.value); setMemo(null);}}>
             {project.collections.map(c => <option key={c.id} value={c.id}>{collectionOption(c)}</option>)}
           </select></label>}
           {collection && <>
@@ -182,7 +183,18 @@ export default function App() {
               <small>{issue.phase} · {issue.code}</small></li>)}</ul></section>}
             {!!collection.summary.body_exclusions?.length && <details className="policy"><summary>본문 보존 제한 내역</summary><ul>{collection.summary.body_exclusions.map(item => <li key={item.reason}>{item.reason}: {item.count}건</li>)}</ul><p>정책상 제외 사유입니다. 수집 오류는 위 확인 항목에서 별도로 확인할 수 있습니다. Metadata와 가능한 Git Locator는 남깁니다.</p></details>}
             {!!collection.summary.body_errors?.length && <p className="hint">오류로 미확보한 본문: {collection.summary.body_errors.map(item => `${item.reason} ${item.count}건`).join(', ')}</p>}
+            {collection.state === 'completed' && <section className="collection-memo">
+              <h3>수집 기록 메모</h3>
+              <p>{collection.title || '제목 없음'}</p><p className="memo-description">{collection.description || '설명 없음'}</p>
+              <button disabled={busy} onClick={() => setMemo(memo ? null : {title: collection.title ?? '', description: collection.description ?? ''})}>제목·설명 편집</button>
+              {memo && <form className="edit" onSubmit={e => {e.preventDefault(); void perform(async () => {
+                const updated = await api<Collection>(`collections/${collection.id}`, 'PATCH', memo);
+                setCollection(updated); setProject(await api<Project>(`projects/${project.id}`)); setMemo(null); setNotice('수집 기록 메모를 저장했습니다.');
+              });}}><label>수집 제목<input maxLength={200} value={memo.title} onChange={e => setMemo({...memo, title: e.target.value})}/></label>
+                <label>수집 설명<textarea maxLength={4000} value={memo.description} onChange={e => setMemo({...memo, description: e.target.value})}/></label>
+                <button disabled={busy}>메모 저장</button></form>}
 
+            </section>}
 
           </>}
           {!collection && <div className="empty"><h3>{active ? '수집 자료 정리 중입니다' : '수집 기록이 없습니다'}</h3><p>{active ? '정리가 끝나면 새로 수집할 수 있습니다.' : '지금 수집으로 자료를 확보하세요.'}</p></div>}

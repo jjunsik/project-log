@@ -108,6 +108,10 @@ SQL migration을 개발·검증할 때 제품 Backend를 먼저 종료한다. `-
 - 과거 Source/문서는 저장한 Commit/tree/blob으로 **원본 Git에서 재조회**한다. 전체 Git backup은
   아니다. Repository 삭제·이동·object 소실 후에는 전체 Source를 복원하지 못할 수 있다.
 
+- 완료된 수집의 제목·설명은 상세 영역에서 작성·수정·비울 수 있다. 같은 제목을 허용하며 사용자 메모이고 AI Evidence가 아니다.
+  제목이 있으면 select에 제목만, 없으면 날짜·시간 · 브랜치 · 수집 완료를 표시한다. 기술 정보는 기본 정보에서 확인한다.
+  시작 흐름에는 메모 입력이 없다.
+
 - UI는 최신 수집 시각·상태와 반복 요약을 표시한다. 직전 새 관측(initial/manual)을 baseline으로
   index·Working·untracked의 `(계층, 경로, stage)` 항목을 비교한다. 신규/사라짐은 관측 항목의
   등장/부재이며 Git rename 판정이나 고유 파일 수가 아니다. 제외된 body의 동일성은 UNKNOWN이다.

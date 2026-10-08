@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from project_log.collections import Collections, Memo
 from project_log.db import RECORDS, Database, Row
 from project_log.git import CollectionError, diagnose
 from project_log.materials import FORMATS, Materials
@@ -239,6 +240,10 @@ def create_app(
     @app.get("/api/collections/{collection_id}")
     def collection(collection_id: UUID) -> Row:
         return database.detail(str(collection_id))
+
+    @app.patch("/api/collections/{collection_id}")
+    def memo(collection_id: UUID, body: Memo) -> Row:
+        return Collections(database).memo(str(collection_id), body)
 
     @app.get("/api/collections/{collection_id}/records/{kind}")
     def records(
