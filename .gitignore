@@ -1,6 +1,8 @@
 .env
 .env.*
 /docs/
+/current_status.md
+/chatgpt/
 /.idea/
 /poc/phase0/docs/
 /poc/phase0/.venv/
@@ -17,3 +19,16 @@
 /poc/phase0/frontend/test-results/
 /poc/phase0/frontend/playwright-report/
 .DS_Store
+/.venv/
+/.cache/
+/.local/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/test-results/
+/frontend/playwright-report/
+/src/**/__pycache__/
+/tests/**/__pycache__/
+/scripts/**/__pycache__/
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
