@@ -9,6 +9,7 @@ from typing import Any
 MAX_BODY = 1024 * 1024
 SNAPSHOT_BYTES = 16 * MAX_BODY
 SNAPSHOT_SECONDS = 5.0
+DOCUMENT_ROOT = b"docs"
 POLICY = {
     "version": 5,
     "capture_branch": "configured_local_branch_checkout_required",
@@ -24,6 +25,7 @@ POLICY = {
     "status_filters": "disabled",
     "untracked": "safe_regular_text",
     "ignored": "metadata_only_no_recursion",
+    "development_documents": "recursive_repository_root_docs_with_existing_safety_checks",
     "git_history": "collection_refs_and_head_reachable",
     "historical_source": "original_git_object_required",
 }

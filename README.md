@@ -76,7 +76,15 @@ SQL migration을 개발·검증할 때 제품 Backend를 먼저 종료한다. `-
   body/hash 없이 Metadata와 명시적 reason을 남긴다. 부분 마스킹한 본문을 원본으로 저장하지 않는다.
   일반 ignored는 Metadata-only이며 directory 내부를 재귀 수집하지 않는다. symlink를 따라가지 않고
   submodule 내부는 수집하지 않는다. 정책상 제외와 실제 read/collection 오류를 별도로 표시한다.
+- Repository Root의 `docs/`는 장기 로컬 개발 문서 영역이다. Git ignored 상태여도 하위 디렉터리를
+  재귀 관측하며 filename/확장자 allowlist를 적용하지 않는다. 문서에도 기존 안전 검사와 본문·snapshot
+  한도를 적용한다. tracked 문서는 기존 index/Working 관측을 유지하고 중복 문서 관측을 만들지 않는다.
+  그 외 로컬 문서는 별도 document 계층에서 body/raw-byte hash, Collection별 시각·출처를 보존한다.
 
+  `docs/`는 local-only / Git 제외로 운용하며 직접적인 Secret/Credential/민감정보를 기록하지 않는다.
+  single/multi-module 모두 Repository Root의 `docs/` 하나를 사용한다. module 내부 `docs/`는
+  특별 재귀 수집하지 않지만 tracked/safe untracked 등 일반 Repository 수집은 그대로 적용한다.
+  앱은 target Repository의 `.gitignore`를 자동 수정하지 않는다.
 - 각 Collection은 HEAD/branch/refs/reachable History/HEAD tree/index/Working Tree/untracked를
   전체 재관측한다. 직전 HEAD와의 delta만 읽지 않는다. 동일 raw-byte body는 Project 내 content
   reference로 공유하고 immutable Git metadata도 재사용한다. unchanged라도 새 Collection의

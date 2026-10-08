@@ -126,6 +126,7 @@ export default function App() {
             {diagnosisError && <p className="alert" role="alert">{diagnosisError}</p>}
             <button className="primary" disabled={busy || diagnosing}>{busy ? '처리 중…' : '등록하고 수집 시작'}</button>
           </form>
+          <details className="policy"><summary>어떤 자료를 보존하나요?</summary><p>Git 이력과 안전한 text diff, index·Working Tree·untracked의 안전한 text 본문을 확보합니다. Repository Root의 docs/는 Git에서 제외되어 있어도 하위 문서를 수집합니다. 일반 ignored 영역은 경로와 상태만 남기며 재귀 수집하지 않습니다. 문서에도 Secret 의심·Binary·대용량 등 같은 안전 검사를 적용합니다.</p><p>과거 전체 파일 조회에는 원본 Git Repository가 필요합니다. 이 기능은 Repository 백업이 아닙니다.</p></details>
         </section>
         <section className="project-list"><h2>내 프로젝트 <span>{projects.length}</span></h2>
           {!projects.length && <p className="hint">등록된 프로젝트가 없습니다.</p>}
@@ -167,7 +168,7 @@ export default function App() {
               ['미커밋 상태 기록', collection.summary.working_entries], ['보존한 미커밋 본문', collection.summary.preserved_working_bodies],
               ['보존한 Working 본문', collection.summary.preserved_tracked_working_bodies],
               ['보존한 untracked 본문', collection.summary.preserved_untracked_bodies],
-              ['수집 오류', collection.summary.errors],
+              ['보존한 로컬 문서 본문', collection.summary.preserved_document_bodies], ['수집 오류', collection.summary.errors],
             ].map(([label, count]) => <div key={String(label)}><strong>{count ?? '—'}</strong><span>{label}</span></div>)}</div>
             </details>
 

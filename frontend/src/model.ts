@@ -5,6 +5,7 @@ export interface Summary {
   commits?: number; changes?: number; head_files?: number; working_entries?: number;
   preserved_working_bodies?: number; preserved_diffs?: number; document_candidates?: number;
   preserved_untracked_bodies?: number; preserved_tracked_working_bodies?: number; errors?: number;
+  preserved_document_bodies?: number;
   body_exclusions?: {reason: string; count: number}[];
   body_errors?: {reason: string; count: number}[];
 

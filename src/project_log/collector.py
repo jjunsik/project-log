@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from psycopg.types.json import Jsonb
 
 from project_log.db import CollectionStopped, Database, Row, put_content
+from project_log.documents import scan_documents
 from project_log.git import (
     CollectionError,
     Git,
@@ -16,6 +17,7 @@ from project_log.git import (
     status_entries,
 )
 from project_log.policy import (
+    DOCUMENT_ROOT,
     MAX_BODY,
     SNAPSHOT_BYTES,
     SNAPSHOT_SECONDS,
@@ -84,6 +86,36 @@ def capture(
         snapshot["status_count"] = len(entries)
         present = {base64.b64decode(entry["path_b64"]) for entry in entries}
         entries.extend({**path_info(path), "status": "  "} for path in index if path not in present)
+        submodules = {
+            path for path, items in index.items() if any(item["mode"] == "160000" for item in items)
+        }
+        documents, document_signature, document_issues = scan_documents(git.root, submodules, start)
+        snapshot["document_roots"] = [path_info(DOCUMENT_ROOT)]
+        snapshot["documents_listing_sha256"] = document_signature
+        for issue in document_issues:
+            db.issue(
+                collection,
+                "snapshot",
+                issue["document_reason"],
+                "문서 관측을 완료하지 못했습니다.",
+                issue,
+            )
+        merged: list[Row] = []
+        for entry in entries:
+            path = base64.b64decode(entry["path_b64"])
+            if path.rstrip(b"/") == DOCUMENT_ROOT or path.startswith(DOCUMENT_ROOT + b"/"):
+                if entry["status"] == "!!":
+                    continue
+                entry["document_root"] = path_info(DOCUMENT_ROOT)
+            merged.append(entry)
+        observed_paths = {base64.b64decode(entry["path_b64"]) for entry in merged}
+        for entry in documents:
+            path = base64.b64decode(entry["path_b64"])
+            if path not in observed_paths:
+                # Git only reported a collapsed directory, not this path's individual status.
+                merged.append({**entry, "status": None})
+                observed_paths.add(path)
+        entries = merged
         snapshot["working_scope"] = "all_index_and_tracked_working_paths"
         save()
         if len(entries) > 20000:
@@ -189,6 +221,17 @@ def capture(
                 "snapshot",
                 "repository_changed",
                 "관측 중 Repository 상태가 바뀌었습니다. 단일 시점 snapshot이 아닙니다.",
+            )
+        _, after_document_signature, after_document_issues = scan_documents(
+            git.root, submodules, start
+        )
+        if document_signature != after_document_signature or after_document_issues:
+            snapshot["complete"] = False
+            db.issue(
+                collection,
+                "snapshot",
+                "documents_changed_or_incomplete",
+                "문서 관측 중 변경이 감지됐거나 재관측을 완료하지 못했습니다.",
             )
     except CollectionError as exc:
         db.issue(collection, "snapshot", exc.code, exc.message)
