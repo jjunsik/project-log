@@ -80,7 +80,7 @@ SQL migration을 개발·검증할 때 제품 Backend를 먼저 종료한다. `-
   재귀 관측하며 filename/확장자 allowlist를 적용하지 않는다. 문서에도 기존 안전 검사와 본문·snapshot
   한도를 적용한다. tracked 문서는 기존 index/Working 관측을 유지하고 중복 문서 관측을 만들지 않는다.
   그 외 로컬 문서는 별도 document 계층에서 body/raw-byte hash, Collection별 시각·출처를 보존한다.
-
+  같은 내용을 다시 수집하면 content를 재사용하고 수정/신규/삭제도 비교한다.
   `docs/`는 local-only / Git 제외로 운용하며 직접적인 Secret/Credential/민감정보를 기록하지 않는다.
   single/multi-module 모두 Repository Root의 `docs/` 하나를 사용한다. module 내부 `docs/`는
   특별 재귀 수집하지 않지만 tracked/safe untracked 등 일반 Repository 수집은 그대로 적용한다.
@@ -95,6 +95,11 @@ SQL migration을 개발·검증할 때 제품 Backend를 먼저 종료한다. `-
 - 과거 Source/문서는 저장한 Commit/tree/blob으로 **원본 Git에서 재조회**한다. 전체 Git backup은
   아니다. Repository 삭제·이동·object 소실 후에는 전체 Source를 복원하지 못할 수 있다.
 
+- UI는 최신 수집 시각·상태와 반복 요약을 표시한다. 직전 새 관측(initial/manual)을 baseline으로
+  index·Working·untracked의 `(계층, 경로, stage)` 항목을 비교한다. 신규/사라짐은 관측 항목의
+  등장/부재이며 Git rename 판정이나 고유 파일 수가 아니다. 제외된 body의 동일성은 UNKNOWN이다.
+  첫 관측이나 미완성 snapshot에는 비교 수치를 만들지 않는다. legacy Collection은 clean tracked
+  관측이 없을 수 있으므로 정책 확대 후 신규 항목을 실제 파일 생성이라고 해석하지 않는다.
 - 파일/diff의 1 MiB 본문 제외는 정책상 제한이다. 총 snapshot 예산·Git 실행 제한·object 조회
   오류·미완성 snapshot으로 정상 완료하지 못한 Collection은 전용 부분 자료까지 정리한다.
 - Git 조회는 hook·fsmonitor·external diff·textconv·자동 fetch와 설정된 clean/process filter를

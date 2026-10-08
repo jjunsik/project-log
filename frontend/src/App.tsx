@@ -171,7 +171,11 @@ export default function App() {
               ['보존한 로컬 문서 본문', collection.summary.preserved_document_bodies], ['수집 오류', collection.summary.errors],
             ].map(([label, count]) => <div key={String(label)}><strong>{count ?? '—'}</strong><span>{label}</span></div>)}</div>
             </details>
-
+            {collection.summary.comparison?.available ? <section className="comparison"><h3>이전 관측과 비교</h3><div className="counts">{[
+              ['신규', collection.summary.comparison.new], ['변경', collection.summary.comparison.changed],
+              ['동일', collection.summary.comparison.unchanged], ['사라짐', collection.summary.comparison.deleted],
+              ['본문 동일성 미확인', collection.summary.comparison.unknown],
+            ].map(([label, count]) => <div key={String(label)}><strong>{count}</strong><span>{label}</span></div>)}</div><p className="hint">index·Working Tree·untracked·로컬 문서의 경로별 관측 항목을 비교합니다. 신규·사라짐은 관측 항목의 등장·부재이며 rename 판정이 아닙니다.</p></section> : <p className="comparison hint">{collection.summary.comparison?.reason === 'incomplete_snapshot' ? '미완성 관측이 있어 비교 결과를 확정할 수 없습니다.' : collection.summary.comparison?.reason === 'baseline_deleted' ? '비교 대상 수집이 삭제되었습니다.' : '비교할 이전 관측이 없습니다.'}</p>}
             {!!collection.issues?.length && <section className="issues"><h3>확인이 필요한 항목</h3><ul>{collection.issues.map(issue => <li key={issue.id}>{issue.message}
               {issue.context?.path && <small>{typeof issue.context.path === 'string' ? issue.context.path : issue.context.path.path}</small>}
               <small>{issue.phase} · {issue.code}</small></li>)}</ul></section>}

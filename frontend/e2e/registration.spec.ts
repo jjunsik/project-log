@@ -45,7 +45,60 @@ test.beforeEach(async ({context, baseURL}) => {
     ? route.continue() : route.abort());
 });
 
-
+test('register, collect, edit status, reload and reject duplicate', async ({page, request, backend}, testInfo) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/');
+  await expect(page.getByLabel('Coding Agent', {exact: true})).toHaveCount(0);
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('main');
+  await expect(page.getByLabel('프로젝트 이름', {exact: true})).toHaveValue('repo');
+  await page.getByLabel('프로젝트 이름', {exact: true}).fill('첫 실제 프로젝트');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const projects = await (await request.get('/api/projects')).json();
+  expect(projects).toHaveLength(1);
+  expect(projects[0]).not.toHaveProperty('coding_agent');
+  expect(projects[0].collection_summary.commits).toBe(1);
+  expect(projects[0].collection_summary.preserved_working_bodies).toBe(5);
+  expect(projects[0].collection_summary.preserved_document_bodies).toBe(1);
+  await expect(page.locator('.counts > div').filter({hasText: '보존한 로컬 문서 본문'}).locator('strong')).toHaveText('1');
+  const initial = await (await request.get(`/api/projects/${projects[0].id}`)).json();
+  expect(initial).not.toHaveProperty('coding_agent');
+  const records = await (await request.get(`/api/collections/${initial.collections[0].id}/records/working_entries`)).json();
+  const document = records.find((row: {layer: string; metadata: {path: string}}) => row.layer === 'document' && row.metadata.path === 'docs/decisions/local.md');
+  expect(document).toBeDefined();
+  const content = await (await request.get(`/api/collections/${initial.collections[0].id}/content/working_entries/${document.id}`)).json();
+  expect(content.body).toBe('Local development decision\n');
+  await page.getByRole('button', {name: '설정 변경'}).click();
+  await expect(page.locator('.edit').getByLabel('Coding Agent', {exact: true})).toHaveCount(0);
+  await page.locator('.edit').getByLabel('프로젝트 상태').selectOption('completed');
+  await page.getByRole('button', {name: '설정 저장'}).click();
+  await expect(page.locator('.detail')).toContainText('개발 완료');
+  await page.screenshot({path: testInfo.outputPath('registered-desktop.png'), fullPage: true});
+  await page.reload();
+  await page.getByRole('button', {name: /첫 실제 프로젝트.*개발 완료/}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  await expect(page.locator('.comparison')).toContainText('비교할 이전 관측이 없습니다.');
+  await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+  await expect(page.locator('.collection-state')).toContainText('현재 시점의 수동 수집');
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  await expect(page.locator('.comparison')).toContainText('동일');
+  await expect(page.locator('.latest-collection')).toContainText('수집 완료');
+  const repeated = await (await request.get(`/api/projects/${projects[0].id}`)).json();
+  expect(repeated.collections).toHaveLength(2);
+  expect(repeated.collections[0].kind).toBe('manual');
+  expect(repeated.collections[0].summary.comparison).toMatchObject({new: 0, changed: 0, deleted: 0, unchanged: 5});
+  await expect(page.getByRole('button', {name: '지금 수집', exact: true})).toBeEnabled();
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('main');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.getByRole('alert')).toContainText('이미 등록');
+  await page.setViewportSize({width: 390, height: 844});
+  await page.screenshot({path: testInfo.outputPath('registered-mobile.png'), fullPage: true});
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});
 
 test('invalid path is rejected and incomplete collection disappears without retry', async ({page, request, backend}) => {
   await page.goto('/');

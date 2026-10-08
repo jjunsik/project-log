@@ -207,10 +207,47 @@ class Database:
                     WHERE collection_id=%s AND layer=%s AND body IS NOT NULL""",
                     (collection, layer),
                 )["n"]
+            counts["comparison"] = self.compare(collection)
             conn.execute(
                 "UPDATE collections SET summary=%s WHERE id=%s", (Jsonb(counts), collection)
             )
             return counts
+
+    def compare(self, collection: str) -> Row:
+        current = self.one(
+            "SELECT baseline_id,snapshot FROM collections WHERE id=%s", (collection,)
+        )
+        baseline = current["baseline_id"]
+        result: Row = {"baseline_id": str(baseline) if baseline else None, "available": False}
+        if not baseline:
+            return {**result, "reason": "first_observation"}
+        previous = self.one("SELECT snapshot FROM collections WHERE id=%s", (baseline,))
+        if not current["snapshot"].get("complete") or not previous["snapshot"].get("complete"):
+            return {**result, "reason": "incomplete_snapshot"}
+
+        def inventory(cid: str) -> dict[tuple[str, str, int], str | None]:
+            items = {}
+            for row in self.all("SELECT * FROM working_records WHERE collection_id=%s", (cid,)):
+                if row["layer"] == "ignored" or row["body_reason"] in {"missing", "deleted"}:
+                    continue
+                meta = row["metadata"]
+                key = (row["layer"], meta["path_b64"], meta.get("stage", 0))
+                items[key] = meta.get("oid") if row["layer"] == "index" else row["sha256"]
+            return items
+
+        before, after = inventory(str(baseline)), inventory(collection)
+        shared = before.keys() & after.keys()
+        known = {key for key in shared if before[key] is not None and after[key] is not None}
+        return {
+            **result,
+            "available": True,
+            "unit": "layer_path_stage_observation",
+            "new": len(after.keys() - before.keys()),
+            "deleted": len(before.keys() - after.keys()),
+            "changed": sum(before[key] != after[key] for key in known),
+            "unchanged": sum(before[key] == after[key] for key in known),
+            "unknown": len(shared - known),
+        }
 
     def observe_commit(
         self,

@@ -46,6 +46,96 @@ def storage_counts(db):
     }
 
 
+def test_repeated_observation_dedup_changed_new_deleted_and_commit(db, git, tmp_path):
+    root = tmp_path / "repo"
+    first_commit = commit(git, root, "tracked.py", "initial raw\r\n", "initial")
+    (root / "a.custom").write_bytes(b"raw\r\n")
+    (root / "gone.txt").write_bytes(b"delete later\n")
+    projects, first = register(db, root)
+    finish(db, first)
+    pid = str(db.detail(first)["project_id"])
+    original = db.detail(first)
+    first_rows = inventory(db, first)
+    assert original["summary"]["comparison"] == {
+        "available": False,
+        "baseline_id": None,
+        "reason": "first_observation",
+    }
+    before_storage = storage_counts(db)
+    second = observe(db, projects, pid)
+    second_rows = inventory(db, str(second["id"]))
+    assert storage_counts(db) == before_storage
+    assert set(second_rows) == set(first_rows)
+    for key, old in first_rows.items():
+        assert second_rows[key]["content_id"] == old["content_id"]
+        assert second_rows[key]["id"] != old["id"]
+        assert second_rows[key]["observed_at"] > old["observed_at"]
+    assert second["summary"]["comparison"] == {
+        "available": True,
+        "baseline_id": first,
+        "unit": "layer_path_stage_observation",
+        "new": 0,
+        "changed": 0,
+        "unchanged": 4,
+        "deleted": 0,
+        "unknown": 0,
+    }
+    assert bytes(second_rows[("untracked", "a.custom", 0)]["body"]) == b"raw\r\n"
+    assert (
+        second_rows[("untracked", "a.custom", 0)]["sha256"]
+        == hashlib.sha256(b"raw\r\n").hexdigest()
+    )
+    (root / "a.custom").write_bytes(b"changed\r\n")
+    (root / "gone.txt").unlink()
+    (root / "new.txt").write_bytes(b"new text\n")
+    (root / "tracked.py").write_bytes(b"working change\n")
+    third = observe(db, projects, pid)
+    comparison = third["summary"]["comparison"]
+    assert {k: comparison[k] for k in ("new", "changed", "unchanged", "deleted", "unknown")} == {
+        "new": 1,
+        "changed": 2,
+        "unchanged": 1,
+        "deleted": 1,
+        "unknown": 0,
+    }
+    third_rows = inventory(db, str(third["id"]))
+    assert ("untracked", "gone.txt", 0) not in third_rows
+    assert bytes(third_rows[("working", "tracked.py", 0)]["body"]) == b"working change\n"
+    assert (
+        third_rows[("untracked", "a.custom", 0)]["content_id"]
+        != first_rows[("untracked", "a.custom", 0)]["content_id"]
+    )
+    git("add", "tracked.py")
+    git("commit", "-m", "new commit")
+    latest = git("rev-parse", "HEAD").decode()
+    fourth = observe(db, projects, pid)
+    assert {
+        r["oid"] for r in db.all("SELECT oid FROM commits WHERE collection_id=%s", (fourth["id"],))
+    } == {first_commit, latest}
+    assert db.one("SELECT count(*) AS n FROM git_commits")["n"] == 2
+    old_pointer = db.one(
+        "SELECT content_id FROM commits WHERE collection_id=%s AND oid=%s", (first, first_commit)
+    )
+    assert (
+        db.one(
+            "SELECT content_id FROM commits WHERE collection_id=%s AND oid=%s",
+            (fourth["id"], first_commit),
+        )
+        == old_pointer
+    )
+    assert db.detail(first) == original
+    assert inventory(db, first) == first_rows
+    assert not db.one("SELECT count(*) AS n FROM working_entries WHERE body IS NOT NULL")["n"]
+    with TestClient(create_app(db, start_worker=False)) as client:
+        row = third_rows[("untracked", "a.custom", 0)]
+        response = client.get(f"/api/collections/{third['id']}/content/working_entries/{row['id']}")
+        assert response.json()["body"] == "changed\r\n"
+        assert (
+            client.get(f"/api/collections/{first}/content/working_entries/{row['id']}").status_code
+            == 404
+        )
+
+
 def test_branch_reset_reobserves_all_current_refs_not_head_delta(db, git, tmp_path):
     root = tmp_path / "repo"
     first_oid = commit(git, root, "a", "first\n", "first")
@@ -129,6 +219,27 @@ def test_safe_untracked_all_text_configs_secrets_and_read_failure(db, git, tmp_p
     assert "suspected_secret" in {r["reason"] for r in result["summary"]["body_exclusions"]}
     stored = [bytes(r["body"]) for r in db.all("SELECT body FROM contents")]
     assert bodies["bad.yml"] not in stored and bodies["hardcoded.py"] not in stored
+
+
+def test_commitless_staged_working_untracked_and_untracked_rename(db, git, tmp_path):
+    root = tmp_path / "repo"
+    (root / "staged.txt").write_bytes(b"index\n")
+    git("add", "staged.txt")
+    (root / "staged.txt").write_bytes(b"working\n")
+    (root / "old.txt").write_bytes(b"untracked\n")
+    projects, cid = register(db, root)
+    finish(db, cid)
+    rows = inventory(db, cid)
+    assert bytes(rows[("index", "staged.txt", 0)]["body"]) == b"index\n"
+    assert bytes(rows[("working", "staged.txt", 0)]["body"]) == b"working\n"
+    assert db.detail(cid)["snapshot"]["head"] is None
+    (root / "old.txt").rename(root / "renamed.txt")
+    second = observe(db, projects, str(db.detail(cid)["project_id"]))
+    row = inventory(db, str(second["id"]))[("untracked", "renamed.txt", 0)]
+    assert row["metadata"]["status"] == "??" and "previous" not in row["metadata"]
+    assert second["summary"]["comparison"]["new"] == 1
+    assert second["summary"]["comparison"]["deleted"] == 1
+    assert second["summary"]["commits"] == 0
 
 
 @pytest.mark.parametrize("state", ["capturing", "queued", "running"])

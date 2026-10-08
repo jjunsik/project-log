@@ -4,12 +4,14 @@ import stat
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from project_log import collector
+from project_log.api import create_app
 from project_log.git import Git
 from project_log.policy import MAX_BODY, path_info
 from tests.test_collection import commit, register
-from tests.test_finalization import finish, inventory
+from tests.test_finalization import finish, inventory, observe, storage_counts
 
 
 def repository_state(root: Path):
@@ -33,6 +35,69 @@ def repository_state(root: Path):
         hashlib.sha256(index_file.read_bytes()).hexdigest() if index_file.exists() else None
     )
     return git.head(), git.refs(), git.index(), index_bytes, git.status(), files
+
+
+def test_ignored_root_documents_recursive_repeated_and_tracked_dedup(db, git, tmp_path):
+    root = tmp_path / "repo"
+    commit(git, root, "docs/tracked.md", "tracked document\n", "tracked docs")
+    (root / ".gitignore").write_text("/docs/\n/ordinary/\n")
+    (root / "docs/decisions").mkdir()
+    (root / "docs/arbitrary.custom").write_bytes(b"raw document\r\n")
+    (root / "docs/decisions/gone").write_bytes(b"raw document\r\n")
+    (root / "ordinary").mkdir()
+    (root / "ordinary/private.txt").write_text("not observed\n")
+    before = repository_state(root)
+    projects, first = register(db, root)
+    finish(db, first)
+    assert repository_state(root) == before
+    original = db.detail(first)
+    first_rows = inventory(db, first)
+    assert {k for k in first_rows if k[1].startswith("docs")} == {
+        ("index", "docs/tracked.md", 0),
+        ("working", "docs/tracked.md", 0),
+        ("document", "docs/arbitrary.custom", 0),
+        ("document", "docs/decisions/gone", 0),
+    }
+    a = first_rows[("document", "docs/arbitrary.custom", 0)]
+    b = first_rows[("document", "docs/decisions/gone", 0)]
+    assert bytes(a["body"]) == b"raw document\r\n"
+    assert a["sha256"] == hashlib.sha256(b"raw document\r\n").hexdigest()
+    assert a["content_id"] == b["content_id"]
+    assert a["metadata"]["document_root"]["path"] == "docs"
+    assert a["provenance"]["kind"] == "collection_capture"
+    assert a["body_observed_at"] == a["observed_at"]
+    assert first_rows[("ignored", "ordinary/", 0)]["body_reason"] == "ignored_metadata_only"
+    assert not any("private.txt" in k[1] for k in first_rows)
+    assert original["summary"]["preserved_document_bodies"] == 2
+    pid = str(original["project_id"])
+    counts = storage_counts(db)
+    second = observe(db, projects, pid)
+    assert repository_state(root) == before
+    assert storage_counts(db) == counts
+    second_rows = inventory(db, str(second["id"]))
+    for key, row in first_rows.items():
+        assert second_rows[key]["content_id"] == row["content_id"]
+        assert second_rows[key]["id"] != row["id"]
+        assert second_rows[key]["observed_at"] > row["observed_at"]
+    assert second["summary"]["comparison"]["changed"] == 0
+    assert second["summary"]["comparison"]["new"] == 0
+    (root / "docs/arbitrary.custom").write_bytes(b"changed\r\n")
+    (root / "docs/decisions/gone").unlink()
+    (root / "docs/decisions/new").write_text("new document\n")
+    before = repository_state(root)
+    third = observe(db, projects, pid)
+    assert repository_state(root) == before
+    comparison = third["summary"]["comparison"]
+    assert {key: comparison[key] for key in ("changed", "new", "deleted")} == {
+        "changed": 1,
+        "new": 1,
+        "deleted": 1,
+    }
+    assert db.detail(first) == original
+    assert inventory(db, first) == first_rows
+    with TestClient(create_app(db, start_worker=False)) as client:
+        response = client.get(f"/api/collections/{first}/content/working_entries/{a['id']}")
+        assert response.json()["body"] == "raw document\r\n"
 
 
 def test_ignored_documents_safety_and_read_errors(db, git, tmp_path, monkeypatch):

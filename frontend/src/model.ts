@@ -8,7 +8,8 @@ export interface Summary {
   preserved_document_bodies?: number;
   body_exclusions?: {reason: string; count: number}[];
   body_errors?: {reason: string; count: number}[];
-
+  comparison?: {available: boolean; reason?: string; baseline_id: string | null;
+    new?: number; changed?: number; unchanged?: number; deleted?: number; unknown?: number};
 }
 export interface Collection {
   id: string; state: CollectionState; created_at: string; finished_at: string | null;
