@@ -4,10 +4,18 @@ Project Log는 코드와 개발 Evidence를 연결해, 근거를 확인할 수 �
 만드는 프로젝트다. 흩어진 변경·판단·검증 맥락을 개발자가 매번 일지로 작성하는 부담을 줄이고,
 자동 정리된 결과를 개발자가 검토하는 것을 목표로 한다.
 
+현재 제품 기능은 **프로젝트 등록, 원천 개발 정보 수집·보존과 수집 기록별 자료 조회, 사용자 추가 자료 보존**이다.
+사용자 본인 한 명의 로컬 Web App이며, 1 Project에 1 Local Git Repository를 등록한다.
+Git History와 index·Working Tree·safe untracked, Root `docs/`의 안전한 로컬 개발 문서를 보존하고,
+`지금 수집`으로 현재 상태를
+새 Collection에 다시 관측한다. 진행 중 수집 취소, 완료된 수집 영구 삭제와 제목·설명 메모를 제공한다.
+정상 완료되지 않은 수집은 부분 결과까지 정리하며 실패 이력·재시도·Resume는 제공하지 않는다.
+AI 분석·경험 발견·복원·승인, RAG, Agent 대화 수집, Codex 실행, Remote 연동은 지원하지 않는다.
+
 ## 공개 구조와 실행
 
 - `src/project_log/`: FastAPI, Git 수집, PostgreSQL 저장, Background worker, SQL migrations.
-
+- `frontend/`: React/Vite 등록·수집 상태·자료 탐색 화면, Vitest/Playwright.
 - `tests/`: 실제 PostgreSQL·임시 Git Repository 기반 테스트.
 - `scripts/`: 격리 검증 도구.
 - [`poc/phase0/`](poc/phase0/README.md): 보존된 synthetic Mock Harness와 Review UI. 제품 실행과 별개다.
@@ -116,7 +124,14 @@ SQL migration을 개발·검증할 때 제품 Backend를 먼저 종료한다. `-
 - 완료된 수집의 제목·설명은 상세 영역에서 작성·수정·비울 수 있다. 같은 제목을 허용하며 사용자 메모이고 AI Evidence가 아니다.
   제목이 있으면 select에 제목만, 없으면 날짜·시간 · 브랜치 · 수집 완료를 표시한다. 기술 정보는 기본 정보에서 확인한다.
   시작 흐름에는 메모 입력이 없다. 선택 기록 삭제 후 최신 완료 기록을 선택하고 기록이 없으면 empty state를 보여준다.
-
+- 수집 기록을 선택해 `버전 관리 기록`의 Commit→부모별 변경 파일→보존 diff,
+  `프로젝트 파일`과 `개발 문서`의 실제 경로 구조를 탐색한다. root docs/는 개발 문서에만 포함한다.
+  같은 파일의 HEAD/index/Working 등의 캡처 상태는 파일 하나 안에서 확인한다.
+  본문 미보존·제외 사유, 관측·본문 시각과 출처를 제공하며 과거 Working/문서를 현재 파일로 대체하지 않는다.
+  HEAD 내용은 기존 immutable Git object 조회이므로 지금 읽은 시각과 원본 object 필요 여부를 구분한다.
+  자료 현황은 baseline 기준 이전/선택/증감과 Commit/고유 파일/문서 파일 단위를 표시한다.
+  첫 수집·불완전 관측·과거 문서 범위 미확보에는 확정할 수 없는 수치를 —로 표시한다.
+  폴더별 조회와 목록 pagination을 사용하며 submodule Metadata는 내부 파일과 구분한다.
 - UI는 최신 수집 시각·상태와 반복 요약을 표시한다. 직전 새 관측(initial/manual)을 baseline으로
   index·Working·untracked의 `(계층, 경로, stage)` 항목을 비교한다. 신규/사라짐은 관측 항목의
   등장/부재이며 Git rename 판정이나 고유 파일 수가 아니다. 제외된 body의 동일성은 UNKNOWN이다.

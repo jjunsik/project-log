@@ -1,4 +1,5 @@
 import {useEffect, useRef, useState} from 'react';
+import Browser from './Browser';
 import Materials from './Materials';
 import {api, ApiError, collectionLabels, collectionOption, collectionSelection, hasActiveCollection, suggestedName, statusLabels} from './model';
 import type {Collection, Project, ProjectStatus, Settings} from './model';
@@ -108,6 +109,7 @@ export default function App() {
     <section className="intro"><p className="eyebrow">첫 기록은 프로젝트에서 시작합니다</p><h1>개발의 흔적을, 놓치지 않도록.</h1><p>로컬 프로젝트를 연결해 수집한 변경 이력과 프로젝트 자료를 수집 기록별로 확인합니다.</p></section>
     {(error || pollError || workerError) && <div className="alert" role="alert">{[error, pollError, workerError].filter(Boolean).join(' ')}</div>}
     {notice && <div className="notice" role="status">{notice}</div>}
+    <p className="quality-guide">수집된 정보가 적으면 이후 결과물의 품질이 낮을 수 있습니다. 수집 자료 현황에서 확보한 정보량을 확인하세요.</p>
     <div className="layout">
       <aside>
         <section className="panel"><h2>프로젝트 등록</h2>
@@ -163,6 +165,7 @@ export default function App() {
             <h3>기본 정보</h3>
             <dl className="metadata"><div><dt>수집 날짜/시간</dt><dd>{date(collection.created_at)}</dd></div><div><dt>수집 상태</dt><dd>{collectionLabels[collection.state]}</dd></div><div><dt>관측 시점 HEAD</dt><dd>{collection.snapshot.head === undefined ? '미확보' : collection.snapshot.head ?? 'Commit 없음'}</dd></div><div><dt>수집 당시 Branch</dt><dd>{collection.snapshot.branch === undefined ? '미확보' : collection.snapshot.branch ?? '분리된 HEAD'}</dd></div><div><dt>상태 관측 시간</dt><dd>{date(collection.snapshot.started_at)} — {date(collection.snapshot.finished_at)}</dd></div></dl>
             {collection.snapshot.branch === undefined && <p className="hint">과거 브랜치 정보가 미확보된 기록입니다. 현재 기준 브랜치로 추정하지 않습니다.</p>}
+            <Browser key={collection.id} collection={collection}/>
             <details className="policy"><summary>수집 상세 집계</summary><h3>확보한 원천 자료</h3>
             <div className="counts">{[
               ['Commit', collection.summary.commits], ['파일 변경', collection.summary.changes],
@@ -172,7 +175,7 @@ export default function App() {
               ['보존한 untracked 본문', collection.summary.preserved_untracked_bodies],
               ['보존한 로컬 문서 본문', collection.summary.preserved_document_bodies], ['수집 오류', collection.summary.errors],
             ].map(([label, count]) => <div key={String(label)}><strong>{count ?? '—'}</strong><span>{label}</span></div>)}</div>
-            </details>
+            <p className="hint">수집 중 집계는 달라질 수 있습니다. 문서 후보는 경로·이름 기반 힌트이며 위 카테고리 집계와 다른 단위입니다.</p></details>
             {collection.summary.comparison?.available ? <section className="comparison"><h3>이전 관측과 비교</h3><div className="counts">{[
               ['신규', collection.summary.comparison.new], ['변경', collection.summary.comparison.changed],
               ['동일', collection.summary.comparison.unchanged], ['사라짐', collection.summary.comparison.deleted],

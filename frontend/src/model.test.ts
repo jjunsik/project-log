@@ -1,5 +1,6 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {api, ApiError, collectionOption, collectionSelection, hasActiveCollection} from './model';
+import {encodePath} from './Browser';
 import type {Collection, CollectionState, Project} from './model';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -41,7 +42,9 @@ describe('application API failure and lifecycle contract', () => {
 });
 
 
-
+it('encodes non-ASCII directory locators as UTF-8 bytes without replacing the display path', () => {
+  expect(encodePath('docs/설계/')).toBe(Buffer.from('docs/설계/', 'utf8').toString('base64'));
+});
 
 it('uses only a title in select and keeps technical fallback without description', () => {
   const c = {id: 'one', state: 'completed', created_at: '2026-10-07T00:00:00Z', snapshot: {branch: 'main'}, description: 'private memo'} as Collection;

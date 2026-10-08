@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from project_log.browser import Browser, Category
 from project_log.collections import Collections, Memo
 from project_log.db import RECORDS, Database, Row
 from project_log.git import CollectionError, diagnose
@@ -36,6 +37,7 @@ def create_app(
 ) -> FastAPI:
     database = db or Database()
     projects = Projects(database)
+    browser = Browser(database)
     materials = Materials(database, storage_root, material_max_bytes)
     worker: Worker | None = None
 
@@ -285,6 +287,45 @@ def create_app(
         path_b64: str = Query(max_length=16000),
     ) -> Row:
         return projects.source(str(collection_id), commit, path_b64)
+
+    @app.get("/api/collections/{collection_id}/overview")
+    def overview(collection_id: UUID) -> Row:
+        return browser.overview(str(collection_id))
+
+    @app.get("/api/collections/{collection_id}/browse/{category}")
+    def browse(
+        collection_id: UUID,
+        category: Category,
+        directory_b64: str = Query("", max_length=16000),
+        offset: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> Row:
+        return browser.directory(str(collection_id), category, directory_b64, limit, offset)
+
+    @app.get("/api/collections/{collection_id}/commits")
+    def commits(
+        collection_id: UUID,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> Row:
+        return browser.commits(str(collection_id), limit, offset)
+
+    @app.get("/api/collections/{collection_id}/commits/{commit}")
+    def commit_detail(collection_id: UUID, commit: str) -> Row:
+        return database.one(
+            "SELECT oid,metadata,body_reason,observed_at FROM commit_records "
+            "WHERE collection_id=%s AND oid=%s",
+            (str(collection_id), commit),
+        )
+
+    @app.get("/api/collections/{collection_id}/commits/{commit}/changes")
+    def commit_changes(
+        collection_id: UUID,
+        commit: str,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> Row:
+        return browser.changes(str(collection_id), commit, limit, offset)
 
     @app.get("/api/collections/{collection_id}/content/{kind}/{record_id}")
     def content(collection_id: UUID, kind: str, record_id: int) -> Row:

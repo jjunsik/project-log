@@ -158,9 +158,85 @@ test('unobserved snapshot is not shown as an empty repository', async ({page}) =
 });
 
 
+test('browse captured categories and retain historical Working and documents after a new collection', async ({page, request, backend}, testInfo) => {
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/');
+  await expect(page.getByText('현재 Project Log는 Git으로 관리되는 프로젝트를 지원합니다.', {exact: false})).toBeVisible();
+  await expect(page.locator('.quality-guide')).toContainText('수집된 정보가 적으면');
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('main');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const projects = await (await request.get('/api/projects')).json();
+  const project = await (await request.get(`/api/projects/${projects[0].id}`)).json();
+  const initialId = project.collections[0].id;
+  await expect(page.locator('.inventory tbody tr').filter({hasText: '프로젝트 파일'}).locator('td').nth(1)).toHaveText('2');
+  await expect(page.locator('.inventory tbody tr').filter({hasText: '개발 문서'}).locator('td').nth(1)).toHaveText('1');
+  await expect(page.locator('.inventory tbody tr').first().locator('td').first()).toHaveText('—');
+  await page.getByRole('button', {name: /^initial/}).click();
+  await expect(page.getByRole('heading', {name: 'Commit 상세', exact: true})).toBeVisible();
+  await page.getByRole('button', {name: /^A · README.md/}).click();
+  await expect(page.locator('.source-body')).toContainText('+Test project');
+  await page.getByRole('tab', {name: '프로젝트 파일', exact: true}).click();
+  await expect(page.locator('.evidence-list').first()).not.toContainText('docs');
+  await page.getByRole('button', {name: /^README.md/}).click();
+  await expect(page.locator('.source-body')).toHaveText('Changed after commit\n');
+  await page.getByLabel('캡처 상태').selectOption({label: 'HEAD · Git object'});
+  await expect(page.locator('.source-body')).toHaveText('Test project\n');
+  await expect(page.getByText('수집 당시 보존한 Commit/blob locator로', {exact: false})).toBeVisible();
+  await page.getByRole('tab', {name: '개발 문서', exact: true}).click();
+  await page.getByRole('button', {name: /▸ decisions/}).click();
+  await page.getByRole('button', {name: /^local.md/}).click();
+  await expect(page.locator('.source-body')).toHaveText('Local development decision\n');
+  writeFileSync(join(backend, 'repo/docs/decisions/local.md'), 'Document NOW\n');
+  writeFileSync(join(backend, 'repo/README.md'), 'Working NOW\n');
+  await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+  await expect(page.locator('.collection-state')).toContainText('현재 시점의 수동 수집');
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  await expect(page.locator('.inventory tbody tr').filter({hasText: '개발 문서'}).locator('td')).toHaveText(['1', '1', '0']);
+  await page.getByLabel('수집 기록').selectOption(initialId);
+  await expect(page.locator('.evidence-browser')).toBeVisible();
+  await page.getByRole('tab', {name: '개발 문서', exact: true}).click();
+  await page.getByRole('button', {name: /▸ decisions/}).click();
+  await page.getByRole('button', {name: /^local.md/}).click();
+  await expect(page.locator('.source-body')).toHaveText('Local development decision\n');
+  await page.getByRole('tab', {name: '프로젝트 파일', exact: true}).click();
+  await page.getByRole('button', {name: /^README.md/}).click();
+  await expect(page.locator('.source-body')).toHaveText('Changed after commit\n');
+  await page.screenshot({path: testInfo.outputPath('historical-browser.png'), fullPage: true});
+  await page.setViewportSize({width: 390, height: 844});
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({path: testInfo.outputPath('historical-browser-mobile.png'), fullPage: true});
+  expect(errors).toEqual([]);
+});
 
-
-
+test('zero commits and no source allow completed registration and all status changes', async ({page, request, backend}) => {
+  await page.goto('/');
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'empty-repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('start/here');
+  await page.getByRole('combobox', {name: '프로젝트 상태', exact: true}).selectOption('completed');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  await expect(page.locator('.metadata')).toContainText('Commit 없음');
+  await expect(page.locator('.metadata')).toContainText('start/here');
+  await expect(page.locator('.quality-guide')).toContainText('수집된 정보가 적으면');
+  const [project] = await (await request.get('/api/projects')).json();
+  expect(project.base_branch).toBe('start/here');
+  expect(project.collection_summary.commits).toBe(0);
+  for (const status of ['new', 'ongoing', 'completed']) {
+    await page.getByRole('button', {name: '설정 변경'}).click();
+    await page.locator('.edit').getByRole('combobox', {name: '프로젝트 상태', exact: true}).selectOption(status);
+    await page.getByRole('button', {name: '설정 저장'}).click();
+    await expect(page.locator('.edit')).toHaveCount(0);
+    expect((await (await request.get(`/api/projects/${project.id}`)).json()).status).toBe(status);
+  }
+  await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+  await expect(page.locator('.collection-state')).toContainText('현재 시점의 수동 수집');
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const detail = await (await request.get(`/api/projects/${project.id}`)).json();
+  expect(detail.collections).toHaveLength(2);
+  expect(detail.collections.every((c: {snapshot: {head: null; branch: string}}) => c.snapshot.head === null && c.snapshot.branch === 'start/here')).toBe(true);
+});
 
 test('edit base branch, reject mismatch without writes, and preserve historical branch', async ({page, request, backend}, testInfo) => {
   const root = join(backend, 'repo');
@@ -234,7 +310,80 @@ test.describe('legacy project configuration', () => {
   });
 });
 
-
+test('user files stay Project-owned across Collections, download copies and confirm permanent deletion', async ({page, request, backend}, testInfo) => {
+  await page.goto('/');
+  await page.getByLabel('프로젝트 경로', {exact: true}).fill(join(backend, 'repo'));
+  await expect(page.getByLabel('기준 브랜치', {exact: true})).toHaveValue('main');
+  await page.getByRole('button', {name: '등록하고 수집 시작'}).click();
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  const [project] = await (await request.get('/api/projects')).json();
+  const detail = await (await request.get(`/api/projects/${project.id}`)).json();
+  const initial = detail.collections[0].id;
+  const overview = await (await request.get(`/api/collections/${initial}/overview`)).json();
+  const summary = await (await request.get(`/api/collections/${initial}`)).json();
+  const section = page.getByRole('region', {name: '사용자 추가 자료', exact: true});
+  await expect(section).toBeVisible();
+  expect(await page.getByRole('tab').allTextContents()).toEqual(['버전 관리 기록', '프로젝트 파일', '개발 문서']);
+  const source = join(backend, 'external-report.md'), original = '# 사용자 근거\r\n';
+  const keep = join(backend, 'keep.csv');
+  writeFileSync(source, original); writeFileSync(keep, 'metric,value\npassed,1\n');
+  const chooserPromise = page.waitForEvent('filechooser');
+  await section.getByRole('button', {name: '파일 추가', exact: true}).click();
+  const chooser = await chooserPromise;
+  expect(chooser.isMultiple()).toBe(true);
+  expect(await section.getByLabel('추가할 파일').getAttribute('webkitdirectory')).toBeNull();
+  await chooser.setFiles([source, keep]);
+  await expect(section.locator('.material-list li')).toHaveCount(2);
+  await expect(section.getByRole('button', {name: '파일 추가', exact: true})).toBeEnabled();
+  const rows = await (await request.get(`/api/projects/${project.id}/materials`)).json();
+  expect(rows.map((r: {filename: string}) => r.filename)).toEqual(['keep.csv', 'external-report.md']);
+  expect(await (await request.get(`/api/collections/${initial}/overview`)).json()).toEqual(overview);
+  expect(await (await request.get(`/api/collections/${initial}`)).json()).toEqual(summary);
+  renameSync(source, source + '.moved'); unlinkSync(source + '.moved');
+  const downloadPromise = page.waitForEvent('download');
+  await section.getByRole('link', {name: 'external-report.md', exact: true}).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('external-report.md');
+  const downloaded = testInfo.outputPath('external-report.md');
+  await download.saveAs(downloaded);
+  expect(readFileSync(downloaded, 'utf8')).toBe(original);
+  await page.getByRole('button', {name: '지금 수집', exact: true}).click();
+  await expect(page.locator('.collection-state')).toContainText('현재 시점의 수동 수집');
+  await expect(page.locator('.collection-state')).toContainText('수집 완료');
+  await expect(section.locator('.material-list li')).toHaveCount(2);
+  await expect(page.locator('.inventory tbody tr').filter({hasText: '프로젝트 파일'}).locator('td')).toHaveText(['2', '2', '0']);
+  await expect(page.locator('.inventory tbody tr').filter({hasText: '개발 문서'}).locator('td')).toHaveText(['1', '1', '0']);
+  await page.getByLabel('수집 기록').selectOption(initial);
+  await expect(section.locator('.material-list li')).toHaveCount(2);
+  // Another Project owns an independent copy of identical bytes.
+  const other = await (await request.post('/api/projects', {data: {path: join(backend, 'empty-repo'), name: '별도 프로젝트', status: 'new', base_branch: 'start/here'}})).json();
+  const otherUpload = await request.put(`/api/projects/${other.id}/materials`, {data: Buffer.from(original), headers: {'Content-Type': 'application/octet-stream', 'X-File-Name': 'external-report.md'}});
+  expect(otherUpload.status()).toBe(201);
+  page.once('dialog', async dialog => {expect(dialog.message()).toContain('복구할 수 없습니다'); await dialog.dismiss();});
+  await section.getByRole('button', {name: 'keep.csv 삭제', exact: true}).click();
+  await expect(section.locator('.material-list li')).toHaveCount(2);
+  const keepRow = rows.find((r: {filename: string}) => r.filename === 'keep.csv');
+  expect(existsSync(join(backend, 'storage/materials', project.id, keepRow.id))).toBe(true);
+  page.once('dialog', async dialog => {expect(dialog.message()).toContain('영구 삭제'); await dialog.accept();});
+  await section.getByRole('button', {name: 'keep.csv 삭제', exact: true}).click();
+  await expect(section.locator('.material-list li')).toHaveCount(1);
+  expect(readFileSync(keep, 'utf8')).toBe('metric,value\npassed,1\n');
+  expect(existsSync(join(backend, 'storage/materials', project.id, keepRow.id))).toBe(false);
+  page.once('dialog', dialog => dialog.accept());
+  await section.getByRole('button', {name: 'external-report.md 삭제', exact: true}).click();
+  await expect(section.locator('.material-list li')).toHaveCount(0);
+  expect(await (await request.get(`/api/projects/${project.id}/materials`)).json()).toEqual([]);
+  const otherRow = await otherUpload.json();
+  expect(await (await request.get(`/api/projects/${other.id}/materials/${otherRow.id}/file`)).text()).toBe(original);
+  expect(readdirSync(join(backend, 'storage/materials', project.id))).toEqual([]);
+  expect(readdirSync(join(backend, 'storage/.tmp'))).toEqual([]);
+  await page.getByRole('button', {name: /별도 프로젝트/}).click();
+  await expect(section.getByRole('link', {name: 'external-report.md'})).toBeVisible();
+  await page.screenshot({path: testInfo.outputPath('user-materials-desktop.png'), fullPage: true});
+  await page.setViewportSize({width: 390, height: 844});
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({path: testInfo.outputPath('user-materials-mobile.png'), fullPage: true});
+});
 
 test('drop and chooser share first-failure policy, reject actual folders and report all unuploaded names', async ({page, request, backend}) => {
   await page.goto('/');
