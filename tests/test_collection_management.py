@@ -332,12 +332,14 @@ def test_delete_baseline_and_legacy_repair_references(db, git, tmp_path):
     assert not db.all("SELECT * FROM collection_repairs")
 
 
-def test_memos_only_completed_duplicate_clear_and_evidence_identity_unchanged(db, git, tmp_path):
+def test_memos_active_and_completed_duplicate_clear_and_evidence_identity_unchanged(
+    db, git, tmp_path
+):
     projects, pid, first = completed(db, git, tmp_path)
     second = str(projects.collect_now(pid)["id"])
     management = Collections(db)
-    with pytest.raises(CollectionError):
-        management.memo(second, Memo(title="forbidden"))
+    management.memo(second, Memo(title="수집 중 메모", description="선택 입력"))
+    assert db.detail(second)["state"] == "queued"
     with pytest.raises(CollectionError):
         management.remove(second)
     with pytest.raises(CollectionError):

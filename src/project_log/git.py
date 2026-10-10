@@ -32,6 +32,8 @@ class Git:
         timeout: float = 15,
         limit: int = 32 * 1024 * 1024,
         optional: bool = False,
+        optional_false: bytes = b"",
+        config: dict[str, str] | None = None,
     ) -> bytes:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         env.update(
@@ -60,6 +62,7 @@ class Git:
             "credential.helper=",
             "-c",
             "protocol.allow=never",
+            *[item for key, value in (config or {}).items() for item in ("-c", f"{key}={value}")],
             "-C",
             str(self.root),
             *args,
@@ -101,7 +104,7 @@ class Git:
                 code = proc.wait(timeout=max(0.01, deadline - time.monotonic()))
                 if code != 0:
                     if optional and code == 1:
-                        return b""
+                        return optional_false
                     raise CollectionError(
                         "git_read_failed",
                         "Git 자료를 읽지 못했습니다. 경로·권한·object를 확인하세요.",
@@ -366,6 +369,25 @@ def diagnose(value: str) -> tuple[Git, dict[str, Any]]:
     if root != path:
         raise CollectionError("not_root", "Git Repository의 최상위 폴더를 입력하세요.")
     common = git.run("rev-parse", "--path-format=absolute", "--git-common-dir").rstrip(b"\n")
+    git_directory = Path(
+        os.fsdecode(git.run("rev-parse", "--absolute-git-dir").rstrip(b"\n"))
+    ).resolve()
+    common_directory = Path(os.fsdecode(common)).resolve()
+    if git_directory != common_directory:
+        # A copied linked worktree must not silently reuse another worktree's index/admin state.
+        try:
+            backref = git_directory / "gitdir"
+            if backref.is_symlink() or backref.stat().st_size > 4096:
+                raise OSError()
+            if Path(backref.read_text().strip()).resolve(strict=True) != (root / ".git").resolve(
+                strict=True
+            ):
+                raise OSError()
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise CollectionError(
+                "worktree_invalid",
+                "linked worktree 관리 경로가 연결되지 않습니다. 자동 복구하지 않습니다.",
+            ) from exc
     branch = git.symbolic_head()
     return git, {
         "path": str(root),

@@ -14,8 +14,8 @@ CLEANUP = {"cancel_pending", "cleanup_pending", "partial", "failed"}
 
 class Memo(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    title: Annotated[str | None, StringConstraints(max_length=200)] = None
-    description: Annotated[str | None, StringConstraints(max_length=4000)] = None
+    title: Annotated[str | None, StringConstraints(max_length=50)] = None
+    description: Annotated[str | None, StringConstraints(max_length=200)] = None
 
 
 class Collections:
@@ -48,8 +48,10 @@ class Collections:
     def memo(self, collection: str, memo: Memo) -> Row:
         with self.db.connect() as conn:
             row = self._lock(conn, collection)
-            if row["state"] != "completed":
-                raise CollectionError("conflict", "완료된 수집만 제목과 설명을 편집할 수 있습니다.")
+            if row["state"] not in ACTIVE | {"completed"}:
+                raise CollectionError(
+                    "conflict", "취소·실패·정리 중인 수집의 메모는 저장할 수 없습니다."
+                )
             updated = conn.execute(
                 "UPDATE collections SET title=%s,description=%s WHERE id=%s RETURNING *",
                 (

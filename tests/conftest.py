@@ -12,6 +12,13 @@ from scripts.verification_db import temporary_database
 def isolated_material_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROJECT_LOG_STORAGE_ROOT", str(tmp_path / "material-storage"))
     monkeypatch.delenv("PROJECT_LOG_MATERIAL_MAX_BYTES", raising=False)
+    # Test-owned OS home; no application/user directory is exposed by API fixtures.
+    from project_log import api
+    from project_log.folders import Folders
+
+    monkeypatch.setattr(
+        api, "Folders", lambda database, home=None: Folders(database, home or tmp_path)
+    )
 
 
 @pytest.fixture

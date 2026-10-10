@@ -45,6 +45,14 @@ def test_historical_structure_body_variants_and_commits(db, git, tmp_path):
         assert all(v is None for v in overview["delta"].values())
         nodes = client.get(f"/api/collections/{cid}/browse/files").json()["items"]
         assert {n["name"] for n in nodes} == {"src", "build.sql"}
+        structure = client.get(f"/api/collections/{cid}/browse/structure").json()
+        assert structure["total"] == 3
+        assert {n["name"] for n in structure["items"]} == {"docs", "src", "build.sql"}
+        structure_docs = client.get(
+            f"/api/collections/{cid}/browse/structure",
+            params={"directory_b64": base64.b64encode(b"docs/local/").decode()},
+        ).json()["items"]
+        assert all(v["layer"] == "document" for n in structure_docs for v in n["observations"])
         folder = next(n for n in nodes if n["name"] == "src")
         file = client.get(
             f"/api/collections/{cid}/browse/files", params={"directory_b64": folder["path_b64"]}
@@ -70,6 +78,7 @@ def test_historical_structure_body_variants_and_commits(db, git, tmp_path):
             f"/api/collections/{cid}/browse/documents",
             params={"directory_b64": base64.b64encode(b"docs/local/").decode()},
         ).json()["items"]
+        assert structure_docs == local
         for file in local:
             variant = file["observations"][0]
             body = client.get(
@@ -133,6 +142,7 @@ def test_directory_pagination_and_project_isolation(db, git, tmp_path):
     assert {n["path_b64"] for n in first["items"]}.isdisjoint(
         n["path_b64"] for n in next_page["items"]
     )
+    assert browser.directory(cid, "structure", "", 100, 100) == next_page
     other = tmp_path / "other"
     other.mkdir()
     Git(other).run("init", "-b", "main")

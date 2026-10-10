@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 import psycopg
@@ -19,10 +20,14 @@ class Settings(BaseModel):
     name: Name
     status: ProjectStatus
     base_branch: str = Field(max_length=4096)
+    path: str | None = Field(default=None, min_length=1, max_length=4096)
+    acknowledged_warnings: str | None = None
+    expected_updated_at: datetime | None = None
 
 
 class Registration(Settings):
     path: str = Field(min_length=1, max_length=4096)
+    collect: bool = True
 
 
 class Projects:
@@ -35,7 +40,10 @@ class Projects:
             "SELECT id FROM projects WHERE repository_key=%s", (info["repository_key"],)
         ):
             raise CollectionError("duplicate", "이미 등록된 Repository입니다.")
-        info.update(git.collection_branch(request.base_branch))
+        if request.collect:
+            info.update(git.collection_branch(request.base_branch))
+        else:
+            git.validate_base_branch(request.base_branch)
         project, collection = str(uuid.uuid4()), str(uuid.uuid4())
         try:
             with self.db.connect() as conn:
@@ -54,14 +62,16 @@ class Projects:
                         Jsonb(info),
                     ),
                 )
-                conn.execute(
-                    """INSERT INTO collections(id,project_id,state,policy)
+                if request.collect:
+                    conn.execute(
+                        """INSERT INTO collections(id,project_id,state,policy)
                     VALUES (%s,%s,'capturing',%s)""",
-                    (collection, project, Jsonb(POLICY)),
-                )
+                        (collection, project, Jsonb(POLICY)),
+                    )
         except psycopg.errors.UniqueViolation as exc:
             raise CollectionError("duplicate", "이미 등록된 Repository입니다.") from exc
-        self._capture(collection, git, info, request.base_branch)
+        if request.collect:
+            self._capture(collection, git, info, request.base_branch)
         return self.project(project)
 
     def _capture(self, collection: str, git: Git, info: Row, base_branch: str) -> None:
@@ -139,28 +149,81 @@ class Projects:
         return row
 
     def update(self, project: str, settings: Settings) -> Row:
+        from project_log.materials import Materials
+        from project_log.reconnection import review
+
         with self.db.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM projects WHERE id=%s FOR UPDATE", (project,)
             ).fetchone()
             if row is None:
                 raise CollectionError("not_found", "프로젝트가 없습니다.")
-            if settings.base_branch != row["base_branch"]:
+            if (
+                settings.expected_updated_at is not None
+                and row["updated_at"] != settings.expected_updated_at
+            ):
+                raise CollectionError(
+                    "conflict",
+                    "다른 작업에서 설정이 변경됐습니다. 현재 저장값을 확인한 뒤 다시 저장하세요.",
+                )
+            path_changed = settings.path is not None and settings.path != row["path"]
+            if settings.base_branch != row["base_branch"] or path_changed:
                 if conn.execute(
                     "SELECT 1 FROM collections WHERE project_id=%s AND state<>'completed'",
                     (project,),
                 ).fetchone():
                     raise CollectionError("conflict", "수집이 끝난 뒤 기준 브랜치를 변경하세요.")
-                git, info = diagnose(row["path"])
-                if info["repository_key"] != row["repository_key"]:
+                git, info = diagnose(settings.path or row["path"])
+                if not path_changed and info["repository_key"] != row["repository_key"]:
                     raise CollectionError("repository_replaced", "등록 Repository가 변경됐습니다.")
                 git.validate_base_branch(settings.base_branch)
+                if path_changed:
+                    Materials(self.db).check_repository(info["path"])
+                    result = review(conn, row, git, info, settings.base_branch)
+                    if result["warning_token"] != settings.acknowledged_warnings:
+                        raise CollectionError(
+                            "confirmation_required", "조회 제한이 변경됐습니다. 다시 확인하세요."
+                        )
+                    # Repeat the locator/refs observation immediately before the UPDATE.
+                    _, fresh = diagnose(info["path"])
+                    if fresh != info or git.refs() != result["refs"]:
+                        raise CollectionError(
+                            "repository_changed",
+                            "검증 중 Repository가 변경됐습니다. 다시 확인하세요.",
+                        )
+                    row["path"], row["repository_key"] = info["path"], info["repository_key"]
             conn.execute(
-                """UPDATE projects SET name=%s,status=%s,base_branch=%s,
+                """UPDATE projects SET name=%s,status=%s,base_branch=%s,path=%s,repository_key=%s,
                 updated_at=now() WHERE id=%s""",
-                (settings.name, settings.status, settings.base_branch, project),
+                (
+                    settings.name,
+                    settings.status,
+                    settings.base_branch,
+                    row["path"],
+                    row["repository_key"],
+                    project,
+                ),
             )
         return self.project(project)
+
+    def review_path(self, project: str, settings: Settings) -> Row:
+        from project_log.materials import Materials
+        from project_log.reconnection import review
+
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM projects WHERE id=%s FOR UPDATE", (project,)
+            ).fetchone()
+            if row is None:
+                raise CollectionError("not_found", "프로젝트가 없습니다.")
+            if conn.execute(
+                "SELECT 1 FROM collections WHERE project_id=%s AND state<>'completed'", (project,)
+            ).fetchone():
+                raise CollectionError("conflict", "수집·정리가 끝난 뒤 경로를 변경하세요.")
+            git, info = diagnose(settings.path or row["path"])
+            Materials(self.db).check_repository(info["path"])
+            git.validate_base_branch(settings.base_branch)
+            return review(conn, row, git, info, settings.base_branch)
 
     def source(self, collection: str, commit: str, path_b64: str) -> dict[str, Any]:
         row = self.db.one(

@@ -7,7 +7,7 @@ from urllib.parse import quote, unquote_to_bytes
 from uuid import UUID
 
 import psycopg
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,8 +17,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from project_log.browser import Browser, Category
 from project_log.collections import Collections, Memo
 from project_log.db import RECORDS, Database, Row
+from project_log.folders import Folders
 from project_log.git import CollectionError, diagnose
 from project_log.materials import FORMATS, Materials
+from project_log.native_picker import NativePicker
+from project_log.project_deletion import DeleteProject, ProjectDeletion
 from project_log.service import Projects, Registration, Settings
 from project_log.worker import Worker
 
@@ -28,29 +31,40 @@ class Diagnosis(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
 
+class PickerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=1, max_length=128)
+
+
 def create_app(
     db: Database | None = None,
     *,
     start_worker: bool = True,
     storage_root: Path | None = None,
     material_max_bytes: int | None = None,
+    folder_home: Path | None = None,
 ) -> FastAPI:
     database = db or Database()
     projects = Projects(database)
     browser = Browser(database)
     materials = Materials(database, storage_root, material_max_bytes)
+    folders = Folders(database, folder_home)
+    picker = NativePicker(folders)
+    deletion = ProjectDeletion(database, materials)
     worker: Worker | None = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         nonlocal worker
         database.migrate()
+        deletion.recover()
         if start_worker:
             worker = Worker(database)
             worker.start()
         try:
             yield
         finally:
+            folders.close()
             if worker:
                 worker.close()
 
@@ -74,7 +88,11 @@ def create_app(
             return JSONResponse(
                 {"detail": "외부 웹사이트의 접근은 허용하지 않습니다."}, status_code=403
             )
-        if request.method in {"POST", "PATCH"}:
+        if request.method in {"POST", "PATCH"} or (
+            request.method == "DELETE"
+            and request.url.path.count("/") == 3
+            and request.url.path.startswith("/api/projects/")
+        ):
             if request.headers.get("content-type", "").split(";")[0] != "application/json":
                 return JSONResponse({"detail": "JSON 요청이 필요합니다."}, status_code=415)
             chunks = bytearray()
@@ -145,6 +163,7 @@ def create_app(
 
     @app.post("/api/repositories/diagnose")
     def diagnosis(body: Diagnosis) -> Row:
+        picker.authorize(body.path)
         git, info = diagnose(body.path)
         info["suggested_base_branch"] = git.suggested_base_branch()
         info["duplicate"] = bool(
@@ -160,16 +179,19 @@ def create_app(
             p.repository_info,p.created_at,p.updated_at,
             c.id AS collection_id, c.state AS collection_state,
             c.summary AS collection_summary,
+            c.created_at AS collection_created_at,
+            c.snapshot->>'started_at' AS collection_observed_at,
             EXISTS (SELECT 1 FROM collections a WHERE a.project_id=p.id
                     AND a.state<>'completed') AS collection_busy
             FROM projects p LEFT JOIN LATERAL
-            (SELECT id,state,summary FROM collections WHERE project_id=p.id
+            (SELECT id,state,summary,created_at,snapshot FROM collections WHERE project_id=p.id
                  AND state IN ('completed','capturing','queued','running','cancel_pending')
                  ORDER BY created_at DESC,id DESC LIMIT 1)
             c ON true ORDER BY p.created_at DESC""")
 
     @app.post("/api/projects", status_code=201)
     def register(body: Registration) -> Row:
+        picker.authorize(body.path)
         materials.check_repository(body.path)
         return projects.register(body)
 
@@ -231,9 +253,59 @@ def create_app(
     def project(project_id: UUID) -> Row:
         return projects.project(str(project_id))
 
+    @app.delete("/api/projects/{project_id}")
+    def delete_project(project_id: UUID, body: DeleteProject) -> Row:
+        try:
+            deletion.delete(str(project_id), body.name)
+        except OSError as exc:
+            raise CollectionError(
+                "storage_failed",
+                "프로젝트 삭제 또는 사본 정리를 완료하지 못했습니다. "
+                "저장소 상태를 확인한 뒤 다시 시도하세요.",
+            ) from exc
+        return {"deleted": str(project_id)}
+
     @app.patch("/api/projects/{project_id}")
     def update(project_id: UUID, body: Settings) -> Row:
+        if body.path and body.path != projects.project(str(project_id))["path"]:
+            picker.authorize(body.path)
+            materials.check_repository(body.path)
         return projects.update(str(project_id), body)
+
+    @app.post("/api/projects/{project_id}/path-review")
+    def path_review(project_id: UUID, body: Settings) -> Row:
+        path = body.path or projects.project(str(project_id))["path"]
+        picker.authorize(path)
+        materials.check_repository(path)
+        return projects.review_path(str(project_id), body)
+
+    @app.get("/api/folders/picker")
+    def picker_info() -> Row:
+        return {"token": picker.token}
+
+    @app.post("/api/folders/picker")
+    async def choose_folder(request: Request, body: PickerRequest) -> Row:
+        import secrets
+
+        if (
+            request.headers.get("origin")
+            not in {
+                "http://127.0.0.1:8000",
+                "http://localhost:8000",
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+            }
+            or request.headers.get("x-project-log-intent") != "choose-folder"
+            or not secrets.compare_digest(body.token, picker.token)
+        ):
+            raise HTTPException(status_code=403, detail="명시적인 찾아보기 요청이 필요합니다.")
+        return await run_in_threadpool(picker.choose)
+
+    @app.get("/api/collections/{collection_id}/documents")
+    def documents(
+        collection_id: UUID, offset: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=500)
+    ) -> Row:
+        return browser.documents(str(collection_id), limit, offset)
 
     @app.post("/api/projects/{project_id}/collections", status_code=202)
     def collect_now(project_id: UUID) -> Row | None:

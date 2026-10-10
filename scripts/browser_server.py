@@ -109,8 +109,10 @@ if __name__ == "__main__":
                     (collection, project, Jsonb({})),
                 )
         try:
+            from project_log.api import create_app
+
             uvicorn.run(
-                "project_log.api:create_app", factory=True, host="127.0.0.1", port=args.port
+                create_app(folder_home=args.root.resolve()), host="127.0.0.1", port=args.port
             )
         except SystemExit as exc:
             if exc.code != 0:

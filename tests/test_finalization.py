@@ -387,7 +387,7 @@ def test_upgrade_001_preserves_records_bodies_times_and_is_idempotent():
         ledger = db.all("SELECT * FROM schema_migrations ORDER BY version")
         db.migrate()
         assert db.all("SELECT * FROM schema_migrations ORDER BY version") == ledger
-        assert len(ledger) == 6
+        assert len(ledger) == 7
         assert db.one("SELECT base_branch FROM projects")["base_branch"] is None
         after = {
             "working_entries": "working_records",

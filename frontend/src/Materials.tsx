@@ -1,5 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
 import {api} from './model';
+import {Icon, Pagination, PageCount, Text, type Confirm} from './ui';
 
 interface Material {id: string; filename: string; size_bytes: number; extension: string; added_at: string}
 interface Policy {extensions: string[]; max_bytes: number}
@@ -22,7 +23,8 @@ export async function uploadBatch(items: UploadItem[], upload: (file: File) => P
   return null;
 }
 
-export default function Materials({projectId}: {projectId: string}) {
+export default function Materials({projectId, compact = false, onAll, confirm, notify}: {projectId: string; compact?: boolean; onAll?: () => void; confirm: Confirm; notify: (text:string)=>void}) {
+  const [page, setPage] = useState(1);
   const [materials, setMaterials] = useState<Material[]>([]);
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [error, setError] = useState('');
@@ -65,24 +67,24 @@ export default function Materials({projectId}: {projectId: string}) {
       });
       if (!signal.aborted) setFailure(result);
       await refresh(signal);
+      if (!result && !signal.aborted) notify('추가가 완료되었습니다.');
     } catch (e) {if (!signal.aborted) setError(message(e));}
     finally {working.current = false; if (!signal.aborted) setBusy(false);}
   }
 
   async function remove(material: Material) {
-    if (working.current || !window.confirm(`“${material.filename}” 자료를 영구 삭제할까요?\n보관 사본과 정보가 삭제되며 복구할 수 없습니다. PC의 원본 파일은 유지됩니다.`)) return;
+    if (working.current) return;
     working.current = true; setBusy(true); setError('');
     const signal = controller.current.signal;
     try {
       await api(`${path}/${material.id}`, 'DELETE', undefined, signal);
-      if (!signal.aborted) setMaterials(old => old.filter(item => item.id !== material.id));
-    } catch (e) {if (!signal.aborted) setError(message(e));}
+      if (!signal.aborted) {setMaterials(old => old.filter(item => item.id !== material.id)); notify('삭제가 완료되었습니다.');}
+    } catch (e) {if (!signal.aborted) {setError(message(e)); throw e;}}
     finally {working.current = false; if (!signal.aborted) setBusy(false);}
   }
 
-  return <section className="user-materials" aria-label="사용자 추가 자료">
-    <h3>사용자 추가 자료</h3>
-    <p className="hint">이 프로젝트에 직접 추가한 자료입니다. 수집 기록과 별도로 보존하며 수집량·증감에는 포함하지 않습니다.</p>
+  useEffect(() => setPage(p => Math.min(p, Math.max(1, Math.ceil(materials.length/10)))), [materials.length]);
+  const drop = <>
     <div className={`material-drop ${dragging ? 'dragging' : ''}`} aria-label="파일 놓기 영역"
       onDragOver={e => {e.preventDefault(); if (!busy) setDragging(true);}}
       onDragLeave={() => setDragging(false)} onDrop={e => {
@@ -95,21 +97,20 @@ export default function Materials({projectId}: {projectId: string}) {
         }) : Array.from(e.dataTransfer.files).map(file => ({name: file.name, file}));
         void add(items);
       }}>
-      <button disabled={busy || !policy} onClick={() => input.current?.click()}>파일 추가</button>
+      <button disabled={busy || !policy} onClick={() => input.current?.click()}>파일 선택</button>
       <input ref={input} type="file" multiple hidden aria-label="추가할 파일" accept={policy?.extensions.join(',')}
         onChange={e => {void add(Array.from(e.target.files ?? []).map(file => ({name: file.name, file}))); e.target.value = '';}}/>
-      <p>{busy ? '처리 중…' : '여기에 파일을 끌어 놓거나 파일 추가를 선택하세요. 폴더는 지원하지 않습니다.'}</p>
+      <p>{busy ? '처리 중…' : '이 영역에 파일을 드래그 앤 드롭하여 추가할 수 있습니다.'}</p>
       {policy && <small>{policy.extensions.join(', ')} · 파일당 {size(policy.max_bytes)} 이하 · 원본 사본 보존</small>}
-    </div>
+    </div></>;
+  return <section className="card user-materials" aria-label="사용자 추가 자료">
+    <header><h2><Icon name="clip"/> 사용자 추가 자료</h2><div className="actions">{compact ? <button onClick={onAll}>전체 보기 →</button> : <PageCount page={page} total={materials.length}/>}</div></header>
+    {!compact && drop}
     {error && <p className="alert" role="alert">{error}</p>}
     {failure && <div className="alert upload-failure" role="alert"><strong>{failure.filename}</strong>: {failure.reason}
       <p>업로드되지 않음</p><ul>{failure.notUploaded.map((name, i) => <li key={i}>{name}</li>)}</ul></div>}
     {loading ? <p className="hint">자료를 불러오는 중입니다.</p> : !materials.length && <p className="hint">추가한 자료가 없습니다.</p>}
-    <ul className="material-list">{materials.map(material => <li key={material.id}>
-      <div><a href={`/api/${path}/${material.id}/file`} download={material.filename}>{material.filename}</a>
-        <small>{material.extension.slice(1).toUpperCase()} · {size(material.size_bytes)} · {new Date(material.added_at).toLocaleString('ko-KR')} 추가</small></div>
-      <button disabled={busy} aria-label={`${material.filename} 삭제`} onClick={() => void remove(material)}>삭제</button>
-    </li>)}</ul>
-    <p className="hint">최근 추가한 자료부터 표시합니다. 파일명을 선택하면 보관한 원본 사본을 가져옵니다.</p>
+    <div className="table-scroll"><table><thead><tr><th>파일명</th><th>등록일</th><th>크기</th><th>작업</th></tr></thead><tbody>{(compact ? materials.slice(0,3) : materials.slice((page-1)*10,page*10)).map(material => <tr key={material.id}><td><Text text={material.filename}/></td><td>{new Date(material.added_at).toLocaleDateString('ko-KR')}</td><td>{size(material.size_bytes)}</td><td className="actions"><a className="button" href={`/api/${path}/${material.id}/file`} download={material.filename}><Icon name="download"/> 다운로드</a><button className="danger" disabled={busy} aria-label={`${material.filename} 삭제`} onClick={() => confirm('사용자 추가 자료 삭제', `“${material.filename}”의 보관 사본과 정보를 영구 삭제합니다. 복구할 수 없으며 PC의 원본 파일은 유지됩니다.`, () => remove(material))}>삭제</button></td></tr>)}</tbody></table></div>
+    {compact ? drop : <Pagination page={page} total={materials.length} change={setPage}/>}
   </section>;
 }

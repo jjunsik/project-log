@@ -53,11 +53,26 @@ it('uses only a title in select and keeps technical fallback without description
   expect(collectionOption(c)).not.toContain('private memo');
 });
 it('retains an existing selection, otherwise chooses newest completed or empty', () => {
-  const cs = [{id: 'active', state: 'running'}, {id: 'new', state: 'completed'}, {id: 'old', state: 'completed'}] as Collection[];
+  const cs = [{id: 'active', state: 'running', created_at:'2026-10-09T00:00:00Z'}, {id: 'new', state: 'completed', created_at:'2026-10-08T00:00:00Z'}, {id: 'old', state: 'completed', created_at:'2026-10-07T00:00:00Z'}] as Collection[];
+  expect(collectionSelection(cs, '')).toBe('new');
   expect(collectionSelection(cs, 'old')).toBe('old');
+  expect(collectionSelection(cs, 'active')).toBe('active');
   expect(collectionSelection(cs, 'deleted')).toBe('new');
   expect(collectionSelection([], 'deleted')).toBe('');
   expect(hasActiveCollection({collections: [], collection_busy: true} as unknown as Project)).toBe(true);
+});
+
+it('uses the completed numbering order regardless of response order and excludes unfinished defaults', () => {
+  const older={id:'older',state:'completed',created_at:'2026-10-07T00:00:00Z'} as Collection;
+  const sameTime=[{...older,id:'00000000-0000-0000-0000-000000000002',created_at:'2026-10-08T00:00:00Z'},
+    {...older,id:'00000000-0000-0000-0000-000000000001',created_at:'2026-10-08T00:00:00Z'}];
+  expect(collectionSelection([older,...sameTime], '')).toBe(sameTime[0].id);
+  expect(collectionSelection([sameTime[1],older], 'deleted')).toBe(sameTime[1].id);
+  for(const state of ['capturing','queued','running','cancel_pending'] as const) {
+    const active={...older,id:'active',state,created_at:'2026-10-09T00:00:00Z'};
+    expect(collectionSelection([active,older], '')).toBe('older');
+    expect(collectionSelection([active], '')).toBe('');
+  }
 });
 
 it('preserves the HTTP status so a collection removed during polling can be refreshed', async () => {

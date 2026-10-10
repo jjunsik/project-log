@@ -67,7 +67,7 @@ def test_new_and_004_upgrade_are_additive_and_idempotent(tmp_path):
         before = {table: db.all(f"SELECT * FROM {table}") for table in ("projects", "collections")}
         db.migrate()
         ledger = db.all("SELECT * FROM schema_migrations ORDER BY version")
-        assert len(ledger) == 6
+        assert len(ledger) == 7
         db.migrate()
         assert db.all("SELECT * FROM schema_migrations ORDER BY version") == ledger
         for row in db.all("SELECT * FROM collections"):

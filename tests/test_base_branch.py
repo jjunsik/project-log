@@ -279,7 +279,7 @@ def test_003_upgrade_preserves_legacy_unknown_then_cleans_failure_and_collects(g
         assert {k: migrated[k] for k in before_project} == before_project
         assert migrated["base_branch"] is None
         assert {k: db.detail(cid)[k] for k in before_collection} == before_collection
-        assert db.one("SELECT count(*) AS n FROM schema_migrations")["n"] == 6
+        assert db.one("SELECT count(*) AS n FROM schema_migrations")["n"] == 7
         projects = Projects(db)
         worker = Worker(db)
         try:

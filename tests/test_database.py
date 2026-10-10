@@ -33,7 +33,7 @@ def test_verification_database_isolated_and_dropped_after_failure(monkeypatch):
             database = Database(dsn)
             database.migrate()
             database.migrate()
-            assert database.one("SELECT count(*) AS n FROM schema_migrations")["n"] == 6
+            assert database.one("SELECT count(*) AS n FROM schema_migrations")["n"] == 7
             raise RuntimeError("synthetic verification failure")
     with psycopg.connect(local_dsn("postgres")) as conn:
         assert not conn.execute(
