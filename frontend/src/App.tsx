@@ -7,8 +7,8 @@ import ProjectForm from './ProjectForm';
 import {Commits, Documents, CommitDetail, DocumentDetail} from './Evidence';
 import {useData, type FileNode} from './data';
 import {Icon, Modal, Pagination, PageCount, Text, MemoFields, date, message, deltaText, type Confirm} from './ui';
+import {HistoryPages, readVisit, sameLocation, visitState, type Screen, type Visit} from './navigation';
 
-type Screen = 'projects' | 'dashboard' | 'collections' | 'commits' | 'documents' | 'materials' | 'files' | 'settings' | 'add' | 'commit' | 'document';
 interface Overview {selected: {counts: Record<'commits' | 'files' | 'documents', number | null>}; previous: {counts: Record<'commits' | 'files' | 'documents', number | null>} | null; delta: Record<'commits' | 'files' | 'documents', number | null>}
 const names: Record<Screen,string> = {projects:'등록된 프로젝트 목록',dashboard:'대시보드',collections:'수집 기록',commits:'커밋',documents:'개발 문서',materials:'사용자 추가 자료',files:'수집 당시 프로젝트 구조',settings:'프로젝트 설정',add:'프로젝트 추가',commit:'커밋 상세',document:'문서 상세'};
 function CollectionsTable({records, selected, move, edit, remove}: {records: Collection[]; selected: string; move: (c: Collection) => void; edit: (c: Collection) => void; remove: (c: Collection) => void}) {
@@ -27,6 +27,11 @@ export default function App() {
   const [memo,setMemo] = useState<{id:string; title:string; description:string; confirming:boolean; initial?:boolean; busy?:boolean; error?:string} | null>(null);
   const [completedMemo,setCompletedMemo] = useState<{project:string; collection:Collection} | null>(null);
   const [deletion,setDeletion]=useState<{project:Project; name:string; busy?:boolean; error?:string} | null>(null);
+  const [pages,setPages]=useState<Record<string,number>>({});
+  const historyIndex=useRef(readVisit(window.history.state)?.index ?? 0), historyIntent=useRef<'replace' | 'push' | 'restore'>('replace');
+  const beforeNavigation=useRef<Visit | null>(null), blockedHistory=useRef(false), undoPop=useRef(false);
+  const pendingScroll=useRef<number | null>(null), popHandler=useRef<(value:unknown)=>void>(()=>{}), saveVisit=useRef(()=>{});
+  const previousSelection=useRef(selected);
   const deletedProjects=useRef(new Set<string>());
   const selections=useRef<Record<string,{selected:string;page:number;scroll:Record<string,number>}>>({});
   const switcherRef = useRef<HTMLDivElement>(null);
@@ -60,7 +65,7 @@ export default function App() {
   const collection = project?.collections?.find(c => c.id === selected);
   const completed = project?.collections?.filter(c => c.state === 'completed') ?? [];
   const overview = useData<Overview>(collection ? `collections/${collection.id}/overview` : null, `${collection?.state}:${revision}:${completed.map(c=>c.id).join(',')}`);
-  useEffect(() => {setCollectionPage(p => Math.min(p, Math.max(1,Math.ceil(completed.length/10))));}, [completed.length]);
+  useEffect(() => {if(project?.collections)setCollectionPage(p => Math.min(p, Math.max(1,Math.ceil(completed.length/10))));}, [completed.length,project?.collections]);
   useEffect(() => {if(active && !tracked.current) tracked.current = {project:projectId.current,id:active.id,cancel:active.state === 'cancel_pending',at:Date.now()};}, [active]);
   useEffect(() => {
     if(!completedMemo) return;
@@ -69,27 +74,64 @@ export default function App() {
     const c=completedMemo.collection;
     setCompletedMemo(null); setMemo({id:c.id,title:c.title ?? '',description:c.description ?? '',confirming:false,initial:true});
   },[completedMemo,project?.id,memo,confirmation]);
-  const navigate = (next:Screen, action?:() => void) => {
-    const go = () => {scroll.current[screen] = window.scrollY;
+  const captureVisit = ():Visit => ({screen,origin,project:projectId.current,selected,oid,document,collectionPage,pages,scroll:{...scroll.current,[screen]:pendingScroll.current ?? window.scrollY}});
+  saveVisit.current=()=>{if(!blockedHistory.current && historyIntent.current==='replace')window.history.replaceState(visitState(historyIndex.current,captureVisit()),'');};
+  popHandler.current=value=>{
+    const entry=readVisit(value);if(!entry)return;
+    if(undoPop.current){undoPop.current=false;blockedHistory.current=false;return;}
+    if(dirty){const delta=entry.index-historyIndex.current;if(!delta)return;blockedHistory.current=true;undoPop.current=true;window.history.go(-delta);
+      confirm('저장하지 않은 변경사항','입력한 변경사항을 저장하지 않고 이동하시겠습니까?',()=>{setDirty(false);window.history.go(delta);});return;}
+    request.current?.abort();loading.current=false;
+    if(projectId.current!==entry.view.project)tracked.current=null;
+    projectId.current=entry.view.project;historyIndex.current=entry.index;historyIntent.current='restore';beforeNavigation.current=null;
+    const v=entry.view;scroll.current={...v.scroll};pendingScroll.current=v.scroll[v.screen] ?? 0;
+    previousSelection.current=v.selected;setProject(null);setSelected(v.selected);setScreen(v.screen);setOrigin(v.origin);setOid(v.oid);setDocument(v.document);
+    setPages({...v.pages});setCollectionPage(v.collectionPage);setSwitcher(false);setSearch('');setError('');setConfirmation(null);setMemo(null);setCompletedMemo(null);setDeletion(null);
+    void load();
+  };
+  useEffect(()=>{
+    const old=window.history.scrollRestoration;window.history.scrollRestoration='manual';
+    const pop=(e:PopStateEvent)=>popHandler.current(e.state),save=()=>saveVisit.current();
+    window.addEventListener('popstate',pop);window.addEventListener('scroll',save,{passive:true});
+    return()=>{window.removeEventListener('popstate',pop);window.removeEventListener('scroll',save);window.history.scrollRestoration=old;};
+  },[]);
+  useEffect(()=>{
+    if(blockedHistory.current)return;
+    const view=captureVisit();
+    if(historyIntent.current==='push' && beforeNavigation.current && !sameLocation(beforeNavigation.current,view))window.history.pushState(visitState(++historyIndex.current,view),'');
+    else window.history.replaceState(visitState(historyIndex.current,view),'');
+    historyIntent.current='replace';beforeNavigation.current=null;
+  });
+  useEffect(()=>{
+    const y=pendingScroll.current;if(y===null)return;
+    let frame=0,timer:ReturnType<typeof setTimeout>,observer:ResizeObserver;
+    const finish=()=>{pendingScroll.current=null;cancelAnimationFrame(frame);clearTimeout(timer);observer.disconnect();window.removeEventListener('wheel',finish);window.removeEventListener('touchstart',finish);window.removeEventListener('keydown',key);};
+    const key=(e:KeyboardEvent)=>{if(['ArrowDown','ArrowUp','PageDown','PageUp','Home','End',' '].includes(e.key))finish();};
+    const attempt=()=>{frame=requestAnimationFrame(()=>{window.scrollTo(0,y);if(Math.abs(window.scrollY-y)<2)finish();});};
+    observer=new ResizeObserver(attempt);observer.observe(window.document.body);timer=setTimeout(finish,15000);
+    window.addEventListener('wheel',finish,{passive:true});window.addEventListener('touchstart',finish,{passive:true});window.addEventListener('keydown',key);attempt();
+    return()=>{cancelAnimationFrame(frame);clearTimeout(timer);observer.disconnect();window.removeEventListener('wheel',finish);window.removeEventListener('touchstart',finish);window.removeEventListener('keydown',key);};
+  },[screen,project?.id,selected]);
+  const navigate = (next:Screen, action?:() => void, saved=false) => {
+    const go = () => {saveVisit.current();beforeNavigation.current=captureVisit();historyIntent.current='push';scroll.current[screen] = window.scrollY;
       if(next==='projects'){if(projectId.current)selections.current[projectId.current]={selected,page:collectionPage,scroll:{...scroll.current}};request.current?.abort();loading.current=false;projectId.current='';setProject(null);setSelected('');setOid('');setDocument(null);setSearch('');}
-      action?.(); setScreen(next); setSwitcher(false); requestAnimationFrame(() => window.scrollTo(0,scroll.current[next] ?? 0));};
-    if (dirty) confirm('저장하지 않은 변경사항', '입력한 변경사항을 저장하지 않고 이동하시겠습니까?', () => {setDirty(false); go();}); else go();
+      action?.();pendingScroll.current=scroll.current[next] ?? 0;setScreen(next);setSwitcher(false);};
+    if (dirty && !saved) confirm('저장하지 않은 변경사항', '입력한 변경사항을 저장하지 않고 이동하시겠습니까?', () => {setDirty(false); go();}); else go();
   };
   const switchProject = (p:Project, destination:Screen='dashboard') => {if(p.id===projectId.current){navigate(destination);return;}navigate(destination, () => {const freshEntry=!projectId.current;if(projectId.current)selections.current[projectId.current]={selected,page:collectionPage,scroll:{...scroll.current}};request.current?.abort(); loading.current=false; projectId.current=p.id; setProject(p); const previous=selections.current[p.id];setSelected(freshEntry ? '' : previous?.selected ?? ''); setError(''); tracked.current=null; scroll.current=previous?.scroll ?? {}; setCollectionPage(previous?.page ?? 1); setOid('');setDocument(null);void load();});};
   const openCommit = (id:string) => {if(screen !== 'commit') setOrigin(screen); setOid(id); navigate('commit');};
   const openDocument = (f:FileNode) => {setOrigin(screen); setDocument(f); navigate('document');};
-  const move = (c:Collection) => confirm('수집 기록 이동', '정말 이 수집 기록으로 이동하시겠습니까?', () => {setSelected(c.id); setRevision(n=>n+1); navigate('dashboard');});
+  const move = (c:Collection) => confirm('수집 기록 이동', '정말 이 수집 기록으로 이동하시겠습니까?', () => navigate('dashboard',()=>{setSelected(c.id);setRevision(n=>n+1);}));
   const edit = (c:Collection) => setMemo({id:c.id,title:c.title ?? '',description:c.description ?? '',confirming:false});
   const remove = (c:Collection) => confirm('수집 기록 삭제', '이 수집 기록과 해당 기록에만 연결된 자료를 영구 삭제합니다. 복구할 수 없습니다. 프로젝트·다른 수집·사용자 추가 자료·원본 Repository는 유지됩니다.', async () => {await api(`collections/${c.id}`,'DELETE'); setRevision(n=>n+1); await load(); notify('삭제가 완료되었습니다.');});
   const start = () => {if(!project || busy) return; const pid=project.id; confirm('지금 수집', '현재 프로젝트의 자료를 수집하시겠습니까?', async () => {setBusy(true); setError(''); try {const c = await api<Collection | null>(`projects/${pid}/collections`,'POST'); if (!c) throw new Error('자료 확보에 실패했습니다. 완료 기록은 생성되지 않았으며 미완료 자료를 정리합니다.'); if(projectId.current===pid) {tracked.current={project:pid,id:c.id,cancel:false,at:Date.now(),initialMemo:true}; setSelected(c.id);} await load();} finally {setBusy(false);}},true);};
   const cancel = () => {if(!active || !project) return; const c=active, pid=project.id; confirm('수집 취소', '진행 중인 수집을 취소하고 미완료 자료를 정리하시겠습니까? 기존 완료 기록과 사용자 추가 자료는 유지됩니다.', async () => {if(projectId.current===pid) tracked.current={project:pid,id:c.id,cancel:true,at:Date.now()}; setCompletedMemo(current=>current?.collection.id===c.id?null:current); await api(`collections/${c.id}/cancel`,'POST'); await load();});};
   const baseScreen = screen === 'commit' || screen === 'document' ? origin : screen;
   const detail = screen === 'commit' || screen === 'document';
-  const previousSelection = useRef(selected);
   useEffect(() => {if(previousSelection.current !== selected && detail) {setScreen('dashboard'); setDocument(null); setOid('');} previousSelection.current = selected;}, [selected, detail]);
   const allTable = (recent:boolean) => <section className="card"><header><h2>{recent ? '최근 수집 기록' : '전체 수집 기록'}</h2>{recent ? <button onClick={() => navigate('collections')}>전체 보기 →</button> : <PageCount page={collectionPage} total={completed.length}/>}</header><p className="hint">‘이 수집으로 이동’ 버튼을 클릭하면 해당 수집 시점의 자료로 이동할 수 있습니다.</p><CollectionsTable records={recent ? completed.slice(0,5) : completed.slice((collectionPage-1)*10,collectionPage*10)} selected={selected} move={move} edit={edit} remove={remove}/>{!recent && <Pagination page={collectionPage} total={completed.length} change={setCollectionPage}/>}</section>;
   const hierarchy:Screen[] = detail ? ['dashboard',screen==='commit'?'commits':'documents',screen] : ['collections','commits','documents','materials','files'].includes(screen) ? ['dashboard',screen] : [screen];
-  return <div className="app-shell"><aside className="sidebar">
+  return <HistoryPages value={{pages,setPages}}><div className="app-shell"><aside className="sidebar">
     <button className="brand" onClick={()=>navigate('projects')}>PROJECT LOG</button><p>개발의 흔적을 체계적으로.</p>
     <div ref={switcherRef}><button className="project-switch" aria-label={`프로젝트 선택: ${project?.name ?? '없음'}`} aria-expanded={switcher} onClick={() => setSwitcher(!switcher)}><Icon name="folder"/><Text text={project?.name ?? '프로젝트 선택'}/>⌄</button>{switcher && <div className="project-menu"><input aria-label="프로젝트 검색" placeholder="프로젝트 이름 검색" value={search} onChange={e => setSearch(e.target.value)}/>{projects.filter(p=>p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(p=><button key={p.id} aria-current={p.id===project?.id ? 'true' : undefined} onClick={()=>switchProject(p)}><Text text={p.name}/>{p.id===project?.id && <span><Icon name="check"/> 선택됨</span>}</button>)}<button onClick={()=>navigate('add')}>＋ 프로젝트 추가</button></div>}</div>
     <nav><button disabled={!project} className={screen==='dashboard'?'active':''} onClick={()=>navigate('dashboard')}><Icon name="home"/> 대시보드</button><button disabled={!project} className={screen==='settings'?'active':''} onClick={()=>navigate('settings')}><Icon name="settings"/> 프로젝트 설정</button></nav>
@@ -101,7 +143,7 @@ export default function App() {
     {(detail || screen==='files') && <button className="back-button" onClick={()=>navigate(screen==='files'?'dashboard':origin)}>← {names[screen==='files'?'dashboard':origin]}{screen==='commit' && origin==='commits'?'으로':'로'} 돌아가기</button>}
     <div hidden={detail}>
     {baseScreen==='projects' && <section className="projects-page"><header><h1>등록된 프로젝트 목록</h1><button className="primary" onClick={()=>navigate('add')}>＋ 프로젝트 추가</button></header>{!projects.length && <section className="card"><h2>등록된 프로젝트가 없습니다.</h2><p>프로젝트 추가로 로컬 Git Repository를 등록하세요.</p></section>}<div className="project-grid">{projects.map(p=><ProjectCard key={p.id} project={p} open={()=>switchProject(p)} edit={()=>switchProject(p,'settings')} remove={()=>setDeletion({project:p,name:''})}/>)}</div></section>}
-    {baseScreen==='add' && <ProjectForm key="add" confirm={confirm} dirty={setDirty} saved={()=>{}} created={(p,c,failure)=>{projectId.current=p.id;setProject({...p,collections:numberedCollections(p.collections ?? [])});setSelected(c?.id ?? '');setScreen('dashboard');tracked.current=c?{project:p.id,id:c.id,cancel:false,at:Date.now(),initialMemo:true}:null;if(failure)setError(failure);else notify('프로젝트 등록과 첫 수집 요청이 접수됐습니다.');void load();}}/>}
+    {baseScreen==='add' && <ProjectForm key="add" confirm={confirm} dirty={setDirty} saved={()=>{}} created={(p,c,failure)=>navigate('dashboard',()=>{projectId.current=p.id;setProject({...p,collections:numberedCollections(p.collections ?? [])});setSelected(c?.id ?? '');tracked.current=c?{project:p.id,id:c.id,cancel:false,at:Date.now(),initialMemo:true}:null;if(failure)setError(failure);else notify('프로젝트 등록과 첫 수집 요청이 접수됐습니다.');void load();},true)}/>}
     {baseScreen==='settings' && project && <ProjectForm key={project.id} project={project} confirm={confirm} dirty={setDirty} saved={p=>{setProject({...p,collections:numberedCollections(p.collections ?? [])});notify('프로젝트 설정을 저장했습니다.');void load();}} created={()=>{}}/>}
     {!project && !['add','projects'].includes(baseScreen) && <section className="card"><h2>프로젝트를 선택하세요.</h2><button onClick={()=>navigate('projects')}>등록된 프로젝트 목록</button></section>}
     {project && <>
@@ -119,5 +161,5 @@ export default function App() {
     {deletion && <Modal title="프로젝트 영구 삭제" close={()=>setDeletion(null)} busy={deletion.busy}><h3><Text text={deletion.project.name}/></h3><p>이 프로젝트의 등록 정보, 모든 수집 기록·보존 근거와 사용자 추가 자료의 보관 사본을 영구 삭제합니다. 복구 기능이 없습니다.</p><p className="notice">실제 Git Repository 폴더와 원본 파일, 다른 프로젝트의 자료 및 기존 백업은 삭제하지 않습니다.</p><label>삭제할 프로젝트명을 다시 입력하세요.<input aria-label="삭제 확인 프로젝트명" autoComplete="off" value={deletion.name} disabled={deletion.busy} onChange={e=>setDeletion({...deletion,name:e.target.value})}/></label>{deletion.error && <p className="alert" role="alert">{deletion.error}</p>}<footer><button disabled={deletion.busy} onClick={()=>setDeletion(null)}>취소</button><button className="danger" disabled={deletion.busy || deletion.name!==deletion.project.name} onClick={()=>{const d=deletion;setDeletion({...d,busy:true,error:''});void api(`projects/${d.project.id}`,'DELETE',{name:d.name}).then(async()=>{deletedProjects.current.add(d.project.id);delete selections.current[d.project.id];setProjects(old=>old.filter(p=>p.id!==d.project.id));if(projectId.current===d.project.id){projectId.current='';setProject(null);setSelected('');setOid('');setDocument(null);setScreen('projects');}setDeletion(null);await load();notify('삭제가 완료되었습니다.');}).catch(e=>setDeletion({...d,busy:false,error:message(e)}));}}>{deletion.busy?'삭제 중…':'영구 삭제'}</button></footer></Modal>}
     {confirmation && <Modal title={confirmation.title} close={()=>setConfirmation(null)} busy={confirmation.busy}>{confirmation.content}{confirmation.error && <p className="alert" role="alert">{confirmation.error}</p>}<footer><button disabled={confirmation.busy} onClick={()=>setConfirmation(null)}>취소</button><button className="primary" disabled={confirmation.busy} onClick={()=>{const c=confirmation;setConfirmation(c.dismissOnStart ? null : {...c,busy:true,error:''});void Promise.resolve().then(c.action).then(()=>{if(!c.dismissOnStart)setConfirmation(null);}).catch(e=>{if(c.dismissOnStart)setError(message(e));else setConfirmation({...c,busy:false,error:message(e)});});}}>{confirmation.busy?'처리 중…':'확인'}</button></footer></Modal>}
     {memo && !confirmation && <Modal title={memo.initial?'수집 기록 제목·설명 입력':'수집 기록 제목·설명 편집'} close={()=>{if(memo.confirming)setMemo({...memo,confirming:false});else setMemo(null);}} busy={memo.busy}>{memo.initial && <p className="hint">선택 입력입니다. 건너뛰거나 닫아도 이미 시작한 수집을 취소하지 않습니다.</p>}{memo.confirming ? <><p>입력한 제목·설명을 저장하시겠습니까?</p><h3>{memo.title || '제목 없음'}</h3><p className="preserve-lines">{memo.description || '설명 없음'}</p></> : <MemoFields title={memo.title} description={memo.description} change={(title,description)=>setMemo({...memo,title,description})}/>}{memo.error && <p role="alert" className="alert">{memo.error}</p>}<footer><button disabled={memo.busy} onClick={()=>memo.confirming ? setMemo({...memo,confirming:false}) : setMemo(null)}>{memo.initial && !memo.confirming ? '건너뛰기' : '취소'}</button><button className="primary" disabled={memo.busy || Array.from(memo.title).length>50 || Array.from(memo.description).length>200} onClick={()=>{if(!memo.confirming){setMemo({...memo,confirming:true,error:''});return;}const m=memo;setMemo({...m,busy:true,error:''});void api(`collections/${m.id}`,'PATCH',{title:m.title || null,description:m.description || null}).then(async()=>{setMemo(null);await load();notify('수집 기록을 수정했습니다.');}).catch(e=>setMemo({...m,busy:false,error:message(e)}));}}>{memo.busy?'저장 중…':memo.confirming?'확인':'저장'}</button></footer></Modal>}
-    </main></div>;
+    </main></div></HistoryPages>;
 }

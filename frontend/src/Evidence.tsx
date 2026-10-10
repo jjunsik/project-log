@@ -3,9 +3,10 @@ import {collectionCaption, type Collection} from './model';
 import {useData, preferred, type Commit, type FileNode, type Page} from './data';
 import {Icon, date, size, Text, Hash, Pagination, PageCount} from './ui';
 import {EvidenceInfo, ObservationChoice} from './Observation';
+import {useHistoryPage} from './navigation';
 
 export function Commits({collection, compact = false, all, open}: {collection: Collection; compact?: boolean; all?: () => void; open: (c: Commit) => void}) {
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useHistoryPage(`${collection.id}/commits/${compact?'recent':'all'}`);
   const {data, error} = useData<Page<Commit>>(`collections/${collection.id}/commits?limit=${compact ? 3 : 10}&offset=${compact ? 0 : (page-1)*10}`, collection.state);
   useEffect(() => {if (data) setPage(p => Math.min(p, Math.max(1, Math.ceil(data.total/10))));}, [data]);
   return <section className="card"><header><h2><Icon name="branch"/> {compact ? '최근 커밋' : '전체 커밋'}</h2>{compact ? <button onClick={all}>전체 보기 →</button> : <PageCount page={page} total={data?.total ?? 0}/>}</header>{error && <p role="alert">{error}</p>}
@@ -13,7 +14,7 @@ export function Commits({collection, compact = false, all, open}: {collection: C
   </section>;
 }
 export function Documents({collection, compact = false, all, open}: {collection: Collection; compact?: boolean; all?: () => void; open: (file: FileNode) => void}) {
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useHistoryPage(`${collection.id}/documents/${compact?'recent':'all'}`);
   const {data, error} = useData<Page<FileNode>>(`collections/${collection.id}/documents?limit=${compact ? 3 : 10}&offset=${compact ? 0 : (page-1)*10}`, collection.state);
   useEffect(() => {if (data) setPage(p => Math.min(p, Math.max(1, Math.ceil(data.total/10))));}, [data]);
   return <section className="card"><header><h2><Icon name="book"/> {compact ? '개발 문서' : '전체 개발 문서'}</h2>{compact ? <button onClick={all}>전체 보기 →</button> : <PageCount page={page} total={data?.total ?? 0}/>}</header>{error && <p role="alert">{error}</p>}
@@ -25,8 +26,8 @@ interface Content {body: string | null; body_reason?: string | null; provenance?
 export function CommitDetail({collection, oid, parent, notify}: {collection: Collection; oid: string; parent: (oid: string) => void; notify:(text:string)=>void}) {
   const base = `collections/${collection.id}`;
   const {data: commit, error} = useData<Commit>(`${base}/commits/${oid}`);
-  const [page,setPage]=useState(1),[selected,setSelected]=useState<Change | null>(null),[copyError,setCopyError]=useState('');
-  useEffect(()=>{setPage(1);setSelected(null);},[oid]);
+  const [page,setPage]=useHistoryPage(`${collection.id}/commit/${oid}`),[selected,setSelected]=useState<Change | null>(null),[copyError,setCopyError]=useState('');
+  useEffect(()=>{setSelected(null);},[oid]);
   const {data:changes,error:changesError}=useData<Page<Change>>(`${base}/commits/${oid}/changes?limit=10&offset=${(page-1)*10}`);
   const {data:content,error:contentError}=useData<Content>(selected ? `${base}/content/changes/${selected.id}` : null);
   const diffPanel=useRef<HTMLElement>(null);

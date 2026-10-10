@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from 'react';
 import {api} from './model';
 import {Icon, Pagination, PageCount, Text, type Confirm} from './ui';
+import {useHistoryPage} from './navigation';
 
 interface Material {id: string; filename: string; size_bytes: number; extension: string; added_at: string}
 interface Policy {extensions: string[]; max_bytes: number}
@@ -24,7 +25,7 @@ export async function uploadBatch(items: UploadItem[], upload: (file: File) => P
 }
 
 export default function Materials({projectId, compact = false, onAll, confirm, notify}: {projectId: string; compact?: boolean; onAll?: () => void; confirm: Confirm; notify: (text:string)=>void}) {
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useHistoryPage(`${projectId}/materials/${compact?'recent':'all'}`);
   const [materials, setMaterials] = useState<Material[]>([]);
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [error, setError] = useState('');
@@ -83,7 +84,7 @@ export default function Materials({projectId, compact = false, onAll, confirm, n
     finally {working.current = false; if (!signal.aborted) setBusy(false);}
   }
 
-  useEffect(() => setPage(p => Math.min(p, Math.max(1, Math.ceil(materials.length/10)))), [materials.length]);
+  useEffect(() => {if(!loading)setPage(p => Math.min(p, Math.max(1, Math.ceil(materials.length/10))));}, [materials.length, loading, setPage]);
   const drop = <>
     <div className={`material-drop ${dragging ? 'dragging' : ''}`} aria-label="파일 놓기 영역"
       onDragOver={e => {e.preventDefault(); if (!busy) setDragging(true);}}
