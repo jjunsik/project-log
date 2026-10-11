@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useRef, useState, type ReactNode} from 'react';
 import {api, collectionLabels, collectionSelection, hasActiveCollection, numberedCollections, collectionCaption, type Collection, type Project} from './model';
 import ProjectCard from './ProjectCard';
+import ThemeControl from './ThemeControl';
 import Browser from './Browser';
 import Materials from './Materials';
 import ProjectForm from './ProjectForm';
@@ -131,7 +132,7 @@ export default function App() {
   useEffect(() => {if(previousSelection.current !== selected && detail) {setScreen('dashboard'); setDocument(null); setOid('');} previousSelection.current = selected;}, [selected, detail]);
   const allTable = (recent:boolean) => <section className="card"><header><h2>{recent ? '최근 수집 기록' : '전체 수집 기록'}</h2>{recent ? <button onClick={() => navigate('collections')}>전체 보기 →</button> : <PageCount page={collectionPage} total={completed.length}/>}</header><p className="hint">‘이 수집으로 이동’ 버튼을 클릭하면 해당 수집 시점의 자료로 이동할 수 있습니다.</p><CollectionsTable records={recent ? completed.slice(0,5) : completed.slice((collectionPage-1)*10,collectionPage*10)} selected={selected} move={move} edit={edit} remove={remove}/>{!recent && <Pagination page={collectionPage} total={completed.length} change={setCollectionPage}/>}</section>;
   const hierarchy:Screen[] = detail ? ['dashboard',screen==='commit'?'commits':'documents',screen] : ['collections','commits','documents','materials','files'].includes(screen) ? ['dashboard',screen] : [screen];
-  return <HistoryPages value={{pages,setPages}}><div className="app-shell"><aside className="sidebar">
+  return <HistoryPages value={{pages,setPages}}><div className="app-shell"><ThemeControl/><aside className="sidebar">
     <button className="brand" onClick={()=>navigate('projects')}>PROJECT LOG</button><p>개발의 흔적을 체계적으로.</p>
     <div ref={switcherRef}><button className="project-switch" aria-label={`프로젝트 선택: ${project?.name ?? '없음'}`} aria-expanded={switcher} onClick={() => setSwitcher(!switcher)}><Icon name="folder"/><Text text={project?.name ?? '프로젝트 선택'}/>⌄</button>{switcher && <div className="project-menu"><input aria-label="프로젝트 검색" placeholder="프로젝트 이름 검색" value={search} onChange={e => setSearch(e.target.value)}/>{projects.filter(p=>p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(p=><button key={p.id} aria-current={p.id===project?.id ? 'true' : undefined} onClick={()=>switchProject(p)}><Text text={p.name}/>{p.id===project?.id && <span><Icon name="check"/> 선택됨</span>}</button>)}<button onClick={()=>navigate('add')}>＋ 프로젝트 추가</button></div>}</div>
     <nav><button disabled={!project} className={screen==='dashboard'?'active':''} onClick={()=>navigate('dashboard')}><Icon name="home"/> 대시보드</button><button disabled={!project} className={screen==='settings'?'active':''} onClick={()=>navigate('settings')}><Icon name="settings"/> 프로젝트 설정</button></nav>

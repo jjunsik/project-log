@@ -47,6 +47,122 @@ test.beforeEach(async ({context, baseURL, page, backend}) => {
     ? route.continue() : route.abort());
 });
 
+test('Theme bootstrap precedes React, persists three choices and tolerates blocked storage',async({page,browser,baseURL})=>{
+  await page.emulateMedia({colorScheme:'light'});
+  await page.addInitScript(()=>{if(localStorage.getItem('project-log.theme')===null)localStorage.setItem('project-log.theme','dark');});
+  await page.route('**/assets/*.js',route=>route.abort());
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
+  expect(await page.locator('#root').evaluate(el=>el.childElementCount)).toBe(0);
+  expect(await page.locator('html').evaluate(el=>el.style.colorScheme)).toBe('dark');
+  await page.unroute('**/assets/*.js');await page.reload();
+  const choice=page.getByRole('combobox',{name:'테마',exact:true});
+  await expect(choice).toHaveValue('dark');await page.emulateMedia({colorScheme:'dark'});
+  await choice.selectOption('light');await expect(page.locator('html')).toHaveAttribute('data-theme','light');
+  await page.reload();await expect(choice).toHaveValue('light');
+  await choice.selectOption('system');await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
+  expect(await page.evaluate(()=>localStorage.getItem('project-log.theme'))).toBe('system');
+  await page.emulateMedia({colorScheme:'light'});await expect(page.locator('html')).toHaveAttribute('data-theme','light');
+  await page.reload();await expect(choice).toHaveValue('system');
+  const blocked=await browser.newContext({colorScheme:'light'}),restricted=await blocked.newPage(),errors:string[]=[];
+  restricted.on('pageerror',e=>errors.push(e.message));
+  try {
+    await blocked.addInitScript(()=>{Object.defineProperty(window,'localStorage',{get(){throw new Error('storage blocked');}});});
+    await restricted.goto(baseURL!);await expect(restricted.getByRole('combobox',{name:'테마',exact:true})).toHaveValue('system');
+    await restricted.getByRole('combobox',{name:'테마',exact:true}).selectOption('dark');
+    await expect(restricted.locator('html')).toHaveAttribute('data-theme','dark');
+    await restricted.reload();await expect(restricted.getByRole('combobox',{name:'테마',exact:true})).toHaveValue('system');
+    await expect(restricted.locator('html')).toHaveAttribute('data-theme','light');
+    await restricted.emulateMedia({colorScheme:'dark'});await expect(restricted.locator('html')).toHaveAttribute('data-theme','dark');
+    expect(errors).toEqual([]);
+  } finally {await blocked.close();}
+});
+
+test('Theme rendering keeps evidence, forms, history and scroll with a viewport top-right control',async({page,request,backend},info)=>{
+  info.setTimeout(150_000);
+  const repo=join(backend,'repo');
+  for(let i=0;i<11;i++) {
+    writeFileSync(join(repo,'README.md'),`theme ${i}\n`);
+    execFileSync('git',['-C',repo,'-c','core.hooksPath=/dev/null','add','README.md']);
+    execFileSync('git',['-C',repo,'-c','core.hooksPath=/dev/null','commit','-m',`theme ${i}`],{stdio:'ignore'});
+    writeFileSync(join(repo,'docs',`theme-${i}.md`),'원문 보존 · 긴 본문\n'.repeat(120));
+  }
+  const p=await historyProject(request,backend,'테마 프로젝트','repo',2),[latest,oldest]=p.collections;
+  expect((await request.patch(`/api/collections/${latest.id}`,{data:{title:latest.title,description:'선택 설명과 Popover의 테마를 확인합니다. '.repeat(7)}})).ok()).toBe(true);
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.emulateMedia({colorScheme:'light'});await page.goto('/');
+  const choice=page.getByRole('combobox',{name:'테마',exact:true}),control=await page.locator('.theme-control').elementHandle();
+  const setTheme=async(theme:'light'|'dark')=>{await choice.selectOption(theme);await expect(page.locator('html')).toHaveAttribute('data-theme',theme);};
+  const capture=async(name:string,theme:'light'|'dark')=>{
+    await setTheme(theme);const box=await page.locator('.theme-control').boundingBox();expect(box).not.toBeNull();
+    expect(box!.y).toBeLessThan(10);expect(page.viewportSize()!.width-box!.x-box!.width).toBeLessThanOrEqual(22);
+    await page.screenshot({path:info.outputPath(`${name}-${theme}.png`),fullPage:true});
+  };
+  const contrast:Record<string,Record<string,number>>={};
+  const measure=async(theme:'light'|'dark')=>{
+    const colors=await page.evaluate(()=>{
+      const css=getComputedStyle(document.documentElement),names=['text','page','surface','muted','link','accent','accent-soft','accent-surface','on-accent','error','error-bg','warning','warning-bg','tooltip-text','tooltip-bg','code-bg'];
+      return Object.fromEntries(names.map(name=>[name,css.getPropertyValue('--'+name).trim()]));
+    });
+    const luminance=(color:string)=>{const hex=color.length===4?color.slice(1).split('').map(c=>c+c).join(''):color.slice(1);const channels=hex.match(/../g)!.map(value=>parseInt(value,16)/255).map(value=>value<=.04045?value/12.92:((value+.055)/1.055)**2.4);return channels[0]*.2126+channels[1]*.7152+channels[2]*.0722;};
+    const pairs=[['text','page'],['text','surface'],['muted','surface'],['muted','page'],['link','surface'],['link','code-bg'],['accent','accent-soft'],['accent','accent-surface'],['on-accent','accent'],['error','error-bg'],['warning','warning-bg'],['tooltip-text','tooltip-bg'],['text','code-bg']];
+    contrast[theme]=Object.fromEntries(pairs.map(([fg,bg])=>{const a=luminance(colors[fg]),b=luminance(colors[bg]),ratio=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);expect(ratio,`${theme}: ${fg}/${bg}`).toBeGreaterThanOrEqual(4.5);return [fg+'/'+bg,ratio];}));
+  };
+  await expect(choice).toHaveValue('system');await expect(page.locator('html')).toHaveAttribute('data-theme','light');
+  await capture('projects','light');await capture('projects','dark');
+  await page.getByRole('button',{name:'테마 프로젝트 대시보드로 이동',exact:true}).click();
+  await expect(page.locator('.selected-collection')).toContainText('테마 프로젝트 2');
+  for(const theme of ['light','dark'] as const){await capture('dashboard',theme);await measure(theme);}
+  await page.locator('.description-popover>summary').click();await page.screenshot({path:info.outputPath('popover-dark.png'),fullPage:true});
+  await page.locator('.description-popover>summary').click();
+  await page.locator('.collections-table tbody tr').filter({has:page.getByRole('cell',{name:'#1',exact:true})}).getByRole('button',{name:'이 수집으로 이동',exact:true}).click();await approve(page);
+  await expect(page.locator('.selected-collection')).toContainText('테마 프로젝트 1');
+  await choice.selectOption('system');await page.emulateMedia({colorScheme:'light'});
+  await page.locator('.selected-collection').getByRole('button',{name:'편집',exact:true}).click();
+  const title=page.getByLabel('수집 기록 제목',{exact:true});await title.fill('저장하지 않은 제목');
+  await page.getByLabel('수집 기록 설명',{exact:true}).fill('입력 중인 설명');await title.focus();
+  for(const theme of ['dark','light'] as const){await page.emulateMedia({colorScheme:theme});await expect(page.locator('html')).toHaveAttribute('data-theme',theme);await expect(title).toHaveValue('저장하지 않은 제목');await expect(title).toBeFocused();await page.screenshot({path:info.outputPath(`modal-${theme}.png`),fullPage:true});}
+  await page.getByRole('dialog').getByRole('button',{name:'취소',exact:true}).click();
+  await page.locator('.card').filter({has:page.getByRole('heading',{name:'최근 수집 기록',exact:true})}).getByRole('button',{name:'전체 보기 →',exact:true}).click();
+  await capture('collections','light');await capture('collections','dark');await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click();
+  await expect(page.locator('.selected-collection')).toContainText('테마 프로젝트 1');
+  await page.locator('.card').filter({has:page.getByRole('heading',{name:'최근 커밋',exact:true})}).getByRole('button',{name:'전체 보기 →',exact:true}).click();
+  await page.getByRole('button',{name:'2',exact:true}).click();await page.getByRole('button',{name:'상세 보기',exact:true}).first().click();
+  await page.locator('.file-changes button').first().click();await expect(page.locator('.source-body')).toBeVisible();
+  await page.setViewportSize({width:1360,height:560});await page.evaluate(()=>window.scrollTo(0,250));
+  await expect.poll(()=>page.evaluate(()=>Math.abs((history.state.view.scroll.commit ?? 0)-scrollY))).toBeLessThan(2);
+  expect(await page.evaluate(()=>scrollY)).toBeGreaterThan(0);
+  const before=await page.evaluate(()=>({length:history.length,visit:history.state.view,scroll:scrollY,body:document.querySelector('.source-body')?.textContent}));
+  await setTheme('light');await setTheme('dark');
+  const after=await page.evaluate(()=>({length:history.length,visit:history.state.view,scroll:scrollY,body:document.querySelector('.source-body')?.textContent}));
+  expect(after).toEqual(before);await page.setViewportSize({width:1360,height:1080});
+  await capture('commit','light');await capture('commit','dark');
+  await page.goBack();await expect(page.locator('.page-count')).toContainText('2 / 2');await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
+  await page.goForward();await expect(page.locator('.commit-full-message')).toBeVisible();await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
+  await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click();
+  await page.locator('.two-columns>.card').first().getByRole('button',{name:'상세 보기',exact:true}).first().click();await expect(page.locator('.source-body')).toBeVisible();
+  const body=page.locator('.source-body');await body.evaluate(el=>{el.scrollTop=180;});const original=await body.evaluate(el=>({text:el.textContent,scroll:el.scrollTop}));
+  await setTheme('light');await setTheme('dark');expect(await body.evaluate(el=>({text:el.textContent,scroll:el.scrollTop}))).toEqual(original);
+  await capture('document','light');await capture('document','dark');await page.goBack();
+  await page.getByRole('button',{name:'프로젝트 구조 보기',exact:true}).click();
+  await page.locator('.structure-list button').filter({hasText:'README.md'}).click();await expect(page.locator('.source-body')).toBeVisible();await capture('structure','dark');
+  await page.getByRole('button',{name:'← 대시보드로 돌아가기',exact:true}).click();
+  await page.locator('.sidebar').getByRole('button',{name:'프로젝트 설정',exact:true}).click();
+  const name=page.getByLabel('프로젝트 이름',{exact:true});await name.fill('미저장 이름 유지');
+  await capture('settings','light');await capture('settings','dark');await expect(name).toHaveValue('미저장 이름 유지');
+  await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'취소',exact:true}).click();await expect(name).toHaveValue('미저장 이름 유지');
+  await name.fill('테마 프로젝트');await page.getByRole('button',{name:'PROJECT LOG',exact:true}).click();
+  await page.getByRole('button',{name:'＋ 프로젝트 추가',exact:true}).click();await name.fill('등록 중인 이름');
+  await capture('add','light');await capture('add','dark');await expect(name).toHaveValue('등록 중인 이름');
+  await name.fill('');await page.getByRole('button',{name:'PROJECT LOG',exact:true}).click();
+  await page.setViewportSize({width:390,height:844});await capture('mobile-projects','light');await capture('mobile-projects','dark');
+  await page.getByRole('button',{name:'테마 프로젝트 대시보드로 이동',exact:true}).click();await expect(page.locator('.selected-collection')).toContainText('테마 프로젝트 2');await capture('mobile-dashboard','dark');
+  await page.setViewportSize({width:320,height:700});await capture('narrow-dashboard','dark');
+  expect(await control!.evaluate(el=>el.isConnected)).toBe(true);await expect(page.locator('.theme-control')).toHaveCount(1);
+  expect(errors).toEqual([]);await info.attach('theme-contrast',{body:JSON.stringify(contrast,null,2),contentType:'application/json'});
+  expect((await (await request.get(`/api/projects/${p.id}`)).json()).collections.map((c:{id:string})=>c.id)).toEqual([latest.id,oldest.id]);
+});
+
 async function approve(page: import('@playwright/test').Page) {await page.getByRole('dialog').getByRole('button', {name:'확인',exact:true}).click();}
 async function selectRoot(page: import('@playwright/test').Page, directory:string) {
   // Only the OS dialog is stubbed; diagnosis/register/reconnect use the real isolated Backend.
