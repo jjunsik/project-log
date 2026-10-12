@@ -19,7 +19,19 @@
   과거 관측과 현재 재검증을 구분한다.
   Conversation / Compact Summary를 장기 Source of Truth로 삼지 않는다.
 - 설명은 한국어, 자연스러운 기술 용어는 영어로 쓴다. Fixture / Golden / Prompt / Run Data를
-  문서 번역 대상으로 취급하지 않는다. 실제 내용이 필요할 때만 문서를 만들고 중복을 피한다.
+  문서 번역 대상으로 취급하지 않는다. 중요한 내용은 기존 개발 문서에 반영하거나 필요할 때
+  적절한 문서를 생성한다. 특정 파일명·접두사·양식을 강제하거나 사소한 작업마다 문서를 만들지 않는다.
+  Routine 변경을 중복 기록하거나 병행 Log를 미리 만들지 않는다. Codex 대화 원문 자동 수집을 전제하지 않는다.
+- 중요한 개발 과정·판단과 Git / Test로 복원하기 어려운 맥락은 Bootstrap 기간과 무관하게
+  Codex 개발 작업 전반에서 사용자의 반복 지시 없이 논리적 작업 경계에 보존한다.
+  ChatGPT에서 작성해 전달한 실제 작업 지시의 중요한 논의·결정과 Codex가 작업 중 직접
+  검토·판단·선택한 내용을 모두 대상으로 한다. 실제로 검토한 방안과 검토 이유, 채택·제외한
+  방안과 각각의 이유, 결정이 변경된 과정과 이유를 보존한다.
+  문제가 발생하면 문제·원인·해결·검증과 함께 사전 위험 예상 여부, 예상했는데도 발생한 이유
+  또는 예상하지 못한 이유를 확인 가능한 범위에서 기록한다.
+- 의미 있는 개발 경험의 입증·복원에 필요한 행위나 근거 자료를 Codex가 직접 수행·확보할 수
+  없다면 필요한 사용자 행동·자료를 구체적으로 요청한다. Before/After 측정·스크린샷 등
+  변경 후에는 확보하기 어려운 증거가 필요하다면 해당 상태를 변경하기 전에 요청한다.
 - current_status는 현재 상태와 다음 작업을 위한 transient 문서다. 장기 사실은 성격에 맞는
   자료에 보존하며 현재 진행상태·일회성 작업 정보는 AGENTS에 누적하지 않는다.
   의존성·Runtime 버전의 기준은 Manifest / Lockfile / Runtime pin이다.
@@ -33,8 +45,13 @@
 
 ## 사실성과 경계
 
-- Historical Intent, Alternative, Root Cause, 실행한 Test, Metric / Result를 만들어내지 않는다.
-  현재 코드로 과거 이유를 역추론하지 않는다. 출처·시점·불확실성을 유지한다.
+- Historical Intent, Alternative, 논의·판단·예측·행동·성과, Root Cause, 실행한 Test,
+  Metric / Result를 만들어내지 않는다. 현재 코드로 과거 이유를 역추론하지 않는다.
+  출처·시점·불확실성을 유지하고 확인할 수 없는 내용은 미확인으로 구분한다.
+  확보하지 못한 과거 Evidence를 사후에 존재했던 것으로 기록하지 않는다.
+- 코딩 에이전트가 실제 수행한 모든 행위는 사용자가 수행한 것으로 취급한다.
+  에이전트가 수행했다는 이유로 사용자의 작업·기여에서 제외하거나 가치를 낮추지 않는다.
+  실제 수행 주체 등 출처는 보존한다.
 - VERIFIED는 CONFIRMED를 뜻하지 않는다. Review로 EvidenceStatus를 승격하지 않는다.
   Revision / Provenance / Project 격리를 보존하고 조용히 덮어쓰지 않는다.
 - Golden Candidate 승인과 Golden의 의미 변경은 사용자 검토 대상이다. 자동 승인하지 않는다.
@@ -70,14 +87,12 @@
 
 ## Bootstrap Capture — 조건부 적용 중
 
-- Git / Test로 복원하기 어려운 중요한 맥락을 사용자의 반복 지시 없이 논리적 작업 경계에서
-  적절한 local-only canonical 자료에 누적한다. Routine 변경을 중복 기록하거나 병행 Log를
-  미리 만들지 않는다. Bootstrap 기록도 출처와 한계를 가진 Evidence이며 자동 정답이 아니다.
+- Bootstrap 기록도 출처와 한계를 가진 Evidence이며 자동 정답이 아니다.
 - 큰 작업·Phase / Session 전환·Context 유실 위험 전에 누적 자료로 작은 Checkpoint를 한다.
   Context 부족으로 검증 생략·완료 간주·Evidence 삭제를 하지 않는다. 임의 Compact / Session
   종료·전환 없이 근거를 들어 사용자에게 제안한다.
 - 실제 self-dogfooding과 Bootstrap 자료의 비교 검증 후 사용자 명시적 승인으로만 종료한다.
   중대한 Fabrication 0건과 Recall / Missing / Unsupported / 상태 충실도 / Review 부담을
   함께 판단한다. 나머지 종료 기준은 관측 근거로 제안하며 임의 Threshold를 만들지 않는다.
-- 종료 승인과 근거를 보존한 뒤 신규 Capture를 중단하고 Bootstrap 전용 규칙을 제거·교체한다.
+- 종료 승인과 근거를 보존한 뒤 Bootstrap 전용 신규 Capture를 중단하고 Bootstrap 전용 규칙을 제거·교체한다.
   기존 Evidence는 남긴다. 운영 정책의 의미 있는 변경과 이유도 추적 가능하게 기록한다.
