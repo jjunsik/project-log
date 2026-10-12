@@ -47,6 +47,95 @@ test.beforeEach(async ({context, baseURL, page, backend}) => {
     ? route.continue() : route.abort());
 });
 
+test('UI follow-up: path copies share the success toast and report clipboard failure',async({page,request,backend})=>{
+  const p=await historyProject(request,backend,'경로 복사 프로젝트','repo',0);
+  await page.context().grantPermissions(['clipboard-read','clipboard-write']);
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  const copy=async(button:import('@playwright/test').Locator,path:string)=>{
+    await button.click();await expect(page.locator('.toast')).toHaveText('경로를 복사했습니다.');
+    expect(await page.evaluate(()=>navigator.clipboard.readText())).toBe(path);
+    const box=await page.locator('.toast').boundingBox();expect(box!.y).toBeLessThan(40);
+    expect(Math.abs(box!.x+box!.width/2-page.viewportSize()!.width/2)).toBeLessThan(2);
+    await expect(page.locator('.toast')).toHaveCount(0,{timeout:5000});
+    // Fail one write; later writes still use the native clipboard implementation.
+    await page.evaluate(()=>{
+      const original=navigator.clipboard.writeText.bind(navigator.clipboard);let fail=true;
+      Object.defineProperty(navigator.clipboard,'writeText',{configurable:true,value:(value:string)=>{
+        if(fail){fail=false;return Promise.reject(new DOMException('Clipboard denied','NotAllowedError'));}
+        return original(value);
+      }});
+    });
+    await button.click();await expect(page.getByRole('alert')).toContainText('경로를 복사하지 못했습니다.');
+    await expect(page.locator('.toast')).toHaveCount(0);
+  };
+  await page.goto('/');await page.getByRole('button',{name:'경로 복사 프로젝트 대시보드로 이동',exact:true}).click();
+  await copy(page.getByRole('button',{name:'프로젝트 경로 복사',exact:true}),p.path);
+  await page.getByRole('alert').getByRole('button',{name:'닫기',exact:true}).click();
+  await page.locator('.sidebar').getByRole('button',{name:'프로젝트 설정',exact:true}).click();
+  await copy(page.getByRole('button',{name:'경로 복사',exact:true}),p.path);
+  await page.getByRole('button',{name:`프로젝트 선택: ${p.name}`,exact:true}).click();
+  await page.locator('.project-menu').getByRole('button',{name:'＋ 프로젝트 추가',exact:true}).click();
+  await selectRoot(page,'empty-repo');
+  await copy(page.getByRole('button',{name:'경로 복사',exact:true}),join(backend,'empty-repo'));
+  expect(errors).toEqual([]);
+});
+
+test('UI follow-up: add-project sidebar stays disabled across entry routes and History preserves selection',async({page,request,backend})=>{
+  const p=await historyProject(request,backend,'이동 보존','repo',2),older=p.collections[1];
+  await historyProject(request,backend,'다른 프로젝트','empty-repo',0);
+  const dashboard=page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true});
+  const settings=page.locator('.sidebar').getByRole('button',{name:'프로젝트 설정',exact:true});
+  const checkSelection=async(name?:string)=>{
+    await page.getByRole('button',{name:/^프로젝트 선택:/}).click();const menu=page.locator('.project-menu');
+    await expect(menu.getByRole('button')).toHaveCount(3);
+    if(name){const marked=menu.locator('[aria-current=true]');await expect(marked).toHaveCount(1);await expect(marked).toContainText(name);await expect(marked.getByText('선택됨',{exact:true})).toBeVisible();}
+    else{await expect(menu.locator('[aria-current]')).toHaveCount(0);await expect(menu.getByText('선택됨',{exact:true})).toHaveCount(0);}
+    await page.keyboard.press('Escape');await expect(menu).toHaveCount(0);
+  };
+  const blocked=async()=>{
+    await expect(page.getByRole('heading',{name:'프로젝트 추가',exact:true})).toBeVisible();
+    await expect.poll(()=>page.evaluate(()=>history.state.view.screen)).toBe('add');
+    const name=page.getByLabel('프로젝트 이름',{exact:true});await name.fill('미저장 등록 이름');
+    const before=await page.evaluate(()=>({length:history.length,view:history.state.view}));
+    await checkSelection();
+    for(const button of [dashboard,settings]){
+      await expect(button).toBeDisabled();expect(await button.evaluate(el=>getComputedStyle(el).opacity)).toBe('0.5');
+      await button.click({force:true});await button.evaluate((el:HTMLButtonElement)=>el.click());
+      await expect(name).toHaveValue('미저장 등록 이름');await expect(page.getByRole('dialog')).toHaveCount(0);
+    }
+    expect(await page.evaluate(()=>({length:history.length,view:history.state.view}))).toEqual(before);
+  };
+  const back=async()=>{await page.goBack();await expect(page.getByRole('dialog',{name:'저장하지 않은 변경사항',exact:true})).toBeVisible();await approve(page);};
+  await page.goto('/');await page.locator('.projects-page').getByRole('button',{name:'＋ 프로젝트 추가',exact:true}).click();
+  await blocked();await back();await expect(page.getByRole('heading',{name:'등록된 프로젝트 목록',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'이동 보존 대시보드로 이동',exact:true}).click();
+  await page.locator('.collections-table tbody tr').filter({has:page.getByRole('cell',{name:'#1',exact:true})}).getByRole('button',{name:'이 수집으로 이동',exact:true}).click();await approve(page);
+  await expect(page.locator('.selected-collection')).toContainText('이동 보존 1');
+  await checkSelection('이동 보존');
+  await page.getByRole('button',{name:'프로젝트 선택: 이동 보존',exact:true}).click();
+  await page.locator('.project-menu').getByRole('button',{name:'＋ 프로젝트 추가',exact:true}).click();await blocked();
+  expect(await page.evaluate(()=>({project:history.state.view.project,selected:history.state.view.selected}))).toEqual({project:p.id,selected:older.id});
+  const length=await page.evaluate(()=>history.length);
+  await back();await expect(page.locator('.selected-collection')).toContainText('이동 보존 1');await expect(dashboard).toBeEnabled();await expect(settings).toBeEnabled();
+  await checkSelection('이동 보존');
+  await page.goForward();await blocked();expect(await page.evaluate(()=>history.length)).toBe(length);
+  await back();await expect(settings).toBeEnabled();await settings.click();
+  await expect(page.getByLabel('프로젝트 이름',{exact:true})).toHaveValue('이동 보존');
+  await checkSelection('이동 보존');
+  await page.goBack();await expect(page.locator('.selected-collection')).toContainText('이동 보존 1');
+  await page.goForward();await expect(page.getByRole('heading',{name:'프로젝트 설정',exact:true})).toBeVisible();
+  await dashboard.click();await expect(page.locator('.selected-collection')).toContainText('이동 보존 1');
+  await page.getByRole('button',{name:'프로젝트 선택: 이동 보존',exact:true}).click();
+  await page.locator('.project-menu').getByRole('button',{name:'＋ 프로젝트 추가',exact:true}).click();await blocked();
+  await page.getByRole('button',{name:'프로젝트 선택: 이동 보존',exact:true}).click();
+  await page.locator('.project-menu').getByRole('button',{name:'다른 프로젝트',exact:true}).click();await approve(page);
+  await expect(page.locator('.project-header')).toContainText('다른 프로젝트');await checkSelection('다른 프로젝트');
+  await page.goBack();await blocked();
+  expect(await page.evaluate(()=>({project:history.state.view.project,selected:history.state.view.selected}))).toEqual({project:p.id,selected:older.id});
+  await page.goForward();await expect(page.getByRole('dialog',{name:'저장하지 않은 변경사항',exact:true})).toBeVisible();await approve(page);
+  await expect(page.locator('.project-header')).toContainText('다른 프로젝트');await checkSelection('다른 프로젝트');
+});
+
 test('Theme bootstrap precedes React, persists three choices and tolerates blocked storage',async({page,browser,baseURL})=>{
   await page.emulateMedia({colorScheme:'light'});
   await page.addInitScript(()=>{if(localStorage.getItem('project-log.theme')===null)localStorage.setItem('project-log.theme','dark');});
@@ -208,7 +297,10 @@ test('native chooser contract registration, dashboard design, atomic settings, r
   await page.reload();await expect(page.getByRole('heading',{name:'등록된 프로젝트 목록'})).toBeVisible();await page.locator('.project-card').filter({hasText:'renamed'}).click();await expect(page.locator('.project-header')).toContainText('renamed');
   await page.getByRole('button',{name:/프로젝트 선택|▱ renamed/}).click(); await page.getByLabel('프로젝트 검색').fill('rename'); await page.getByRole('button',{name:'＋ 프로젝트 추가',exact:true}).click();
   await selectRoot(page,'repo'); await page.getByRole('button',{name:'등록 후 첫 수집'}).click(); await approve(page);await expect(page.locator('.project-form [role=alert]')).toContainText('이미 등록');
-  await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click(); await approve(page);
+  await expect(page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true})).toBeDisabled();
+  await expect(page.locator('.sidebar').getByRole('button',{name:'프로젝트 설정',exact:true})).toBeDisabled();
+  await page.goBack();await approve(page);await expect(page.locator('.project-header')).toContainText('renamed');
+  await expect(page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true})).toBeEnabled();
   await expect(page.locator('.two-columns>.card').first().locator('tbody tr')).toHaveCount(1);
   await expect(page.locator('.card').filter({has:page.getByRole('heading',{name:'최근 커밋',exact:true})}).locator('tbody tr')).toHaveCount(1);
   await expect(page.locator('.user-materials')).not.toContainText('불러오는 중');
