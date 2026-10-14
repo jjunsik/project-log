@@ -78,7 +78,8 @@ UTF-8 텍스트/Markdown/로그/JSON/CSV, PDF/DOCX, PNG/JPEG를 지원하고 폴
 최근 추가 순으로 표시하며 `다운로드`로 보관 사본을 가져온다. 삭제는 확인 후 영구 삭제하며 복구 기능은 없다.
 같은 Project의 내용 중복·파일명 충돌을 거절한다. 충돌하면 PC 원본 이름을 바꿔 다시 추가한다.
 여러 파일 중 첫 실패에서 중단하고 앞선 성공은 유지한다. 실패 파일과 이후 미처리 파일은 `업로드되지 않음`에 표시한다.
-이 자료는 Project 소유이며 Collection 선택·수집량·증감과 독립이다. 내용 추출/OCR/AI 분석은 하지 않는다.
+이 자료는 Project 소유이며 Collection 선택·수집량·증감과 독립이다. 현재 화면·수집 기능에서는
+내용 추출/OCR/AI 분석을 하지 않는다. 별도 Backend 입력 준비 함수의 범위는 아래 운영자 검증 절을 따른다.
 
 원본 bytes의 사본은 기본 `$XDG_DATA_HOME/project-log`(미설정 시 `~/.local/share/project-log`)에 저장한다.
 `PROJECT_LOG_STORAGE_ROOT`로 관리 root를 변경할 수 있고 등록 Repository 내부 위치는 거절한다.
@@ -177,7 +178,7 @@ SQL migration을 개발·검증할 때 제품 Backend를 먼저 종료한다. `-
   사용자 추가 자료는 유지한다. Git 이력이 같은 복사본의 물리적 출처를 증명하는 기능은 아니다.
   Git fetch·checkout·설정 복구를 자동 수행하지 않는다.
 - HTTP는 loopback에만 bind하며 외부 Origin/Host를 차단한다. 로그인·다중 사용자 기능은 없다.
-  원천 DB/API는 private local data이며 외부 AI/Remote/제품 Codex 호출은 없다.
+  원천 DB/API는 private local data이며 실제 프로젝트 자료의 외부 AI/Remote/제품 Codex 호출은 없다.
 
 ## 검증
 
@@ -216,3 +217,39 @@ blob을 API로 재조회하고 Git/index/refs와 non-ignored 파일의 전후 ha
 
 PoC의 과거 성공은 제품 검증 결과를 대신하지 않으며, 이 기능의 수집 성공도 AI 품질이나
 개발 경험 복원 가능성의 검증 완료를 뜻하지 않는다.
+
+
+## 운영자용 Gemini 합성 연동 검증
+
+별도로 **고정 합성 자료만** 보내는 운영자 검증 명령이 있다. 일반 테스트·수집·제품 실행은 Gemini를 호출하지 않는다.
+실제 프로젝트 자료 전송은 동의·분석 실행·프로젝트 변경 제한 기능이 구현될 때까지 비활성이다.
+호출은 `langchain-google-genai`의 `ChatGoogleGenerativeAI`와 Pydantic 구조화 검증을 사용한다.
+합성 검증은 단일 요청·자동 재시도 금지·SDK 파싱 전 64 KiB body 제한을 유지한다.
+비텍스트 원본은 시각적 개인정보·Secret 검사를 보장할 수 없어 전송 전 별도 검토가 필요하다.
+기존 직접 HTTPS 동의/hash는 새 합성 payload와 별개다.
+
+[Google AI Studio](https://aistudio.google.com/api-keys)에서 운영자 소유의 Billing 미연결 Free tier
+Project와 사용 가능한 모델/한도를 확인한다. 무료 입력·응답은 Google 제품 개선 및 사람 검토 대상이며,
+민감·기밀·개인정보를 보내면 안 된다([정책](https://ai.google.dev/gemini-api/terms)).
+API Key만으로 무료 tier를 확인할 수 없으므로 Billing이 연결된 Project에는 아래 명령을 실행하지 않는다.
+운영자 Key를 Git 제외 영역의 소유자 전용 파일에 안전하게 저장한다. 이용자에게 Key 입력을 요구하지 않는다.
+Key 실제 값을 명령 인자·Source·로그·채팅에 넣지 않는다.
+저장 위치는 Project Log Root의 `.local/ai/gemini-api-key`이며 Key 원문만 저장하고 권한은 `600`이다.
+기존 `/.local/` ignore가 적용된다. 최초 발급·저장은 운영자가 직접 진행한다.
+
+```sh
+# 지정 파일에는 Key만 저장하고 chmod 600으로 소유자 접근만 허용한다.
+export PROJECT_LOG_GEMINI_KEY_FILE="$PWD/.local/ai/gemini-api-key"
+# 가격표의 무료 모델 검토 범위 안에서 명시적으로 선택한다. 제품 모델 확정이 아니다.
+export PROJECT_LOG_GEMINI_MODEL="gemini-3.1-flash-lite"
+# 동의 전에는 안내만 출력하며 외부 호출이나 Key 조회를 하지 않는다.
+.venv/bin/python -m scripts.verify_gemini
+# 현재 고정 합성 입력 전송·무료 데이터 정책과 Free tier를 확인한 경우에만 실행한다.
+.venv/bin/python -m scripts.verify_gemini --confirm-free-tier --confirm-synthetic-transfer
+```
+
+검토한 무료 Standard text 모델은 `gemini-2.5-flash-lite`, `gemini-2.5-flash`,
+`gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`다([가격](https://ai.google.dev/gemini-api/docs/pricing)).
+계정별 사용 가능 여부와 RPM/TPM/RPD는 [AI Studio](https://ai.google.dev/gemini-api/docs/rate-limits)에서
+직접 확인한다. 자동 재시도·유료 fallback·도구·파일 업로드는 사용하지 않는다.
+검증 성공은 합성 API 연동·응답 처리 확인이며 제품 AI 경험 분석의 품질 검증이 아니다.
