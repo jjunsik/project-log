@@ -167,7 +167,7 @@ class AnalysisInput:
         self.db = db
         self.materials = materials
 
-    def prepare(self, project: str) -> InputSnapshot:
+    def prepare(self, project: str, *, enforce_total_budget: bool = True) -> InputSnapshot:
         """Freeze completed observations in one read-only DB snapshot; no current source reads.
 
         This is preparation, not an accepted analysis request. Long-lived project mutation
@@ -191,7 +191,12 @@ class AnalysisInput:
                 reason = content_reason(body)
             if not reason and body is None:
                 reason = "body_not_preserved"
-            if not reason and body is not None and used + len(body) > MAX_INPUT_BYTES:
+            if (
+                not reason
+                and body is not None
+                and enforce_total_budget
+                and used + len(body) > MAX_INPUT_BYTES
+            ):
                 reason = "input_budget_exceeded"
             if reason:
                 body = None

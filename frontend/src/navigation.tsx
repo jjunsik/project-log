@@ -1,12 +1,12 @@
 import {createContext, useCallback, useContext, useState, type Dispatch, type SetStateAction} from 'react';
 import type {FileNode} from './data';
 
-export type Screen = 'projects' | 'dashboard' | 'collections' | 'commits' | 'documents' | 'materials' | 'files' | 'settings' | 'add' | 'commit' | 'document';
+export type Screen = 'projects' | 'dashboard' | 'collections' | 'commits' | 'documents' | 'materials' | 'experiences' | 'files' | 'settings' | 'add' | 'commit' | 'document';
 export interface Visit {
   screen: Screen; origin: Screen; project: string; selected: string; oid: string; document: FileNode | null;
   collectionPage: number; pages: Record<string,number>; scroll: Record<string,number>;
 }
-const screens: Screen[] = ['projects','dashboard','collections','commits','documents','materials','files','settings','add','commit','document'];
+const screens: Screen[] = ['projects','dashboard','collections','commits','documents','materials','experiences','files','settings','add','commit','document'];
 export function readVisit(value: unknown): {index:number; view:Visit} | null {
   const state=value as {projectLog?:number;index?:number;view?:Visit} | null;
   const v=state?.view;

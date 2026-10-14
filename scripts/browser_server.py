@@ -64,6 +64,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--legacy", action="store_true")
     parser.add_argument("--slow", action="store_true")
+    parser.add_argument("--experience-fixture", action="store_true")
     args = parser.parse_args()
     if args.slow:
         from project_log import worker as worker_module
@@ -111,8 +112,20 @@ if __name__ == "__main__":
         try:
             from project_log.api import create_app
 
+            experience_model = None
+            if args.experience_fixture:
+                # Reuse the synthetic protocol fixture; never provide this injection in serve.
+                import sys
+
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+                from test_experiences import OfflineModel
+
+                experience_model = OfflineModel()
+
             uvicorn.run(
-                create_app(folder_home=args.root.resolve()), host="127.0.0.1", port=args.port
+                create_app(folder_home=args.root.resolve(), experience_test_model=experience_model),
+                host="127.0.0.1",
+                port=args.port,
             )
         except SystemExit as exc:
             if exc.code != 0:

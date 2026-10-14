@@ -168,6 +168,7 @@ class ProjectDeletion:
                 (project,),
             )
         for table in (
+            "experience_runs",
             "working_repairs",
             "changes",
             "head_files",

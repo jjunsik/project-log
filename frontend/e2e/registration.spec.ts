@@ -3,14 +3,15 @@ import {execFileSync, spawn} from 'node:child_process';
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 
-const test = base.extend<{backend: string; legacy: boolean; slow: boolean}>({
+const test = base.extend<{backend: string; legacy: boolean; slow: boolean; experience: boolean}>({
   legacy: [false, {option: true}],
   slow: [false, {option: true}],
-  backend: [async ({legacy, slow}, use, testInfo) => {
+  experience: [false, {option: true}],
+  backend: [async ({legacy, slow, experience}, use, testInfo) => {
     const data = mkdtempSync('/private/tmp/pl-browser-');
     const root = resolve(import.meta.dirname, '../..');
     const origin = new URL(testInfo.project.use.baseURL!);
-    const child = spawn(join(root, '.venv/bin/python'), ['scripts/browser_server.py', data, '--port', origin.port, ...(legacy ? ['--legacy'] : []), ...(slow ? ['--slow'] : [])], {
+    const child = spawn(join(root, '.venv/bin/python'), ['scripts/browser_server.py', data, '--port', origin.port, ...(legacy ? ['--legacy'] : []), ...(slow ? ['--slow'] : []), ...(experience ? ['--experience-fixture'] : [])], {
       cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
       env: {...process.env, GEMINI_API_KEY: '', OPENAI_API_KEY: ''},
     });
@@ -588,6 +589,47 @@ async function historyProject(request:import('@playwright/test').APIRequestConte
   for(let i=1;i<=count;i++) {expect((await request.post(`/api/projects/${p.id}/collections`,{data:{}})).ok()).toBe(true);const current=await completed(request,p.id);expect((await request.patch(`/api/collections/${current.collections[0].id}`,{data:{title:`${name} ${i}`,description:''}})).ok()).toBe(true);}
   return (await (await request.get(`/api/projects/${p.id}`)).json());
 }
+
+test.describe('Experience results',()=>{
+  test.use({experience:true});
+  test('Experience results persist and show claims, UNKNOWN, original evidence and project isolation',async({page,request,backend},info)=>{
+    const p=await historyProject(request,backend,'경험 검증','repo',1);
+    const other=await historyProject(request,backend,'다른 프로젝트','empty-repo',0);
+    const image=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j7fkAAAAASUVORK5CYII=','base64');
+    const uploaded=await request.put(`/api/projects/${p.id}/materials`,{data:image,headers:{'content-type':'application/octet-stream','x-file-name':encodeURIComponent('evidence.png')}});expect(uploaded.status()).toBe(201);
+    const saved=await request.post(`/api/projects/${p.id}/experiences`,{data:{}});
+    expect(saved.status()).toBe(201);
+    const run=await saved.json();expect(run.mode).toBe('isolated');expect(run.result.candidates.length).toBeGreaterThan(0);
+    const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.goto('/');await page.getByRole('button',{name:'경험 검증 대시보드로 이동',exact:true}).click();
+    await page.locator('.sidebar').getByRole('button',{name:'개발 경험',exact:true}).click();
+    await expect(page.locator('.experience-candidate')).toContainText('사용자 미검토');
+    await expect(page.locator('.experiences')).toContainText('격리 검증 결과입니다');
+    await expect(page.locator('.experiences').getByRole('button',{name:'분석 시작',exact:true})).toBeDisabled();
+    await expect(page.locator('.experience-candidate')).toContainText('UNKNOWN');
+    await expect(page.locator('.experiences')).toContainText('중요한 개발 경험이 누락될 수 있습니다');
+    await page.locator('.experience-citation button').first().click();
+    await expect(page.locator('.experience-evidence .experience-body').first()).not.toBeEmpty();
+    await page.locator('.experience-citation').filter({hasText:'page 1'}).getByRole('button').first().click();
+    const download=page.locator('.experience-evidence a');await expect(download).toContainText('evidence.png');
+    const media=await request.get((await download.getAttribute('href'))!);expect(media.status()).toBe(200);expect(await media.body()).toEqual(image);
+    await page.reload();
+    // Existing reload behavior opens the project list; re-enter to verify persisted results.
+    await page.getByRole('button',{name:'경험 검증 대시보드로 이동',exact:true}).click();
+    await page.locator('.sidebar').getByRole('button',{name:'개발 경험',exact:true}).click();
+    await expect(page.locator('.experience-candidate')).toContainText('사용자 미검토');
+    await page.getByLabel('테마',{exact:true}).selectOption('dark');
+    await page.screenshot({path:info.outputPath('experiences-dark.png'),fullPage:true});
+    await page.getByLabel('테마',{exact:true}).selectOption('light');
+    await page.screenshot({path:info.outputPath('experiences-light.png'),fullPage:true});
+    await page.getByRole('button',{name:/^프로젝트 선택:/}).click();
+    await page.locator('.project-menu').getByRole('button',{name:'다른 프로젝트',exact:true}).click();
+    await page.locator('.sidebar').getByRole('button',{name:'개발 경험',exact:true}).click();
+    await expect(page.locator('.experiences')).toContainText('저장된 분석 결과가 없습니다');
+    expect((await request.get(`/api/projects/${other.id}/experiences/${run.id}`)).status()).toBe(404);
+    expect(errors).toEqual([]);
+  });
+});
 
 test('Browser History restores visits, pages, scroll and selected evidence without resetting fresh-entry policy',async({page,request,backend},info)=>{
   info.setTimeout(150_000);

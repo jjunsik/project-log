@@ -1,4 +1,5 @@
 import {useEffect, useRef, useState} from 'react';
+import {uploadAnalysisNotice} from './analysisSupport';
 import {api} from './model';
 import {Icon, Pagination, PageCount, Text, type Confirm} from './ui';
 import {useHistoryPage} from './navigation';
@@ -103,6 +104,7 @@ export default function Materials({projectId, compact = false, onAll, confirm, n
         onChange={e => {void add(Array.from(e.target.files ?? []).map(file => ({name: file.name, file}))); e.target.value = '';}}/>
       <p>{busy ? '처리 중…' : '이 영역에 파일을 드래그 앤 드롭하여 추가할 수 있습니다.'}</p>
       {policy && <small>{policy.extensions.join(', ')} · 파일당 {size(policy.max_bytes)} 이하 · 원본 사본 보존</small>}
+      <p className="hint">{uploadAnalysisNotice}</p>
     </div></>;
   return <section className="card user-materials" aria-label="사용자 추가 자료">
     <header><h2><Icon name="clip"/> 사용자 추가 자료</h2><div className="actions">{compact ? <button onClick={onAll}>전체 보기 →</button> : <PageCount page={page} total={materials.length}/>}</div></header>

@@ -10,7 +10,8 @@ Git History와 index·Working Tree·safe untracked, Root `docs/`의 안전한 �
 `지금 수집`으로 현재 상태를
 새 Collection에 다시 관측한다. 진행 중 수집 취소, 완료된 수집 영구 삭제와 제목·설명 메모를 제공한다.
 정상 완료되지 않은 수집은 부분 결과까지 정리하며 실패 이력·재시도·Resume는 제공하지 않는다.
-AI 분석·경험 발견·복원·승인, RAG, Agent 대화 수집, Codex 실행, Remote 연동은 지원하지 않는다.
+개발 경험 화면은 저장된 AI 후보·주장·UNKNOWN·보존 근거를 조회한다. 실제 자료의 AI 분석 실행과
+후보 수정·승인, RAG, Agent 대화 수집, Codex 실행, Remote 연동은 지원하지 않는다.
 
 ## 공개 구조와 실행
 
@@ -221,10 +222,29 @@ PoC의 과거 성공은 제품 검증 결과를 대신하지 않으며, 이 기�
 
 ## 운영자용 Gemini 합성 연동 검증
 
+프로젝트별 `개발 경험` 화면에서 저장된 결과와 원천 근거를 확인한다. 분석 시작은 비활성이다.
+Backend에는 LangGraph 기반 분할 발견·관련 근거 재탐색·복원, 결과·입력 근거 저장과 조회가 있다.
+격리 검증은 합성 근거·Mock 모델과 실제 LangChain/SDK serializer를 사용하며, 제품 서버에는
+검증용 모델·결과를 넣지 않는다. 실제 모델의 발견·해석 품질을 검증한 결과가 아니다.
 별도로 **고정 합성 자료만** 보내는 운영자 검증 명령이 있다. 일반 테스트·수집·제품 실행은 Gemini를 호출하지 않는다.
 실제 프로젝트 자료 전송은 동의·분석 실행·프로젝트 변경 제한 기능이 구현될 때까지 비활성이다.
 호출은 `langchain-google-genai`의 `ChatGoogleGenerativeAI`와 Pydantic 구조화 검증을 사용한다.
 합성 검증은 단일 요청·자동 재시도 금지·SDK 파싱 전 64 KiB body 제한을 유지한다.
+분석 입력은 모든 완료 Collection의 보존 본문과 읽을 수 있는 과거 Git 객체, 지원 텍스트 추가 자료,
+native PDF/PNG/JPEG 및 DOCX text·내부 PNG/JPEG·로컬 변환 PDF를 다룬다. 미확보/보안 제외·형식/크기 제한과
+PDF 입력은 원본 사본·분할 페이지와 출처를 연결한다. 이미지 원본은 자동 축소하지 않는다.
+원본 보존과 AI 분석 지원·완료는 별개이며 DOCX 시각 변환 실패·특수 media 등의 한계를 표시한다.
+DOCX 시각 변환은 검증된 안전 실행 환경이 필요하며 전체 형식 지원 완료를 뜻하지 않는다.
+변경 추적이 있는 DOCX는 전체 분석을 보류한다. 첨부·OLE·altChunk·활성/외부 연결 등은
+시각 변환을 보류하며, 보안 검사를 통과한 텍스트·이미지만 부분 입력으로 사용할 수 있다.
+macOS 변환은 별도 임시 프로필과 작업 내부 Unix IPC를 사용한다. 외부 네트워크·GUI 서비스는
+차단하며 PDF 변환에 불필요한 native 맞춤법 서비스는 작업용 registry 사본에서 제외한다.
+
+macOS Apple Silicon의 로컬 DOCX 변환 Runtime 설치 도구는
+`.venv/bin/python scripts/install_libreoffice.py`다. 공식 배포 SHA-256과 서명을 확인해
+pin된 LibreOffice를 프로젝트 `.local/runtimes/`에 복사한다. 최초 실행에는 다운로드와
+일시적인 readonly DMG mount 권한이 필요하다. `/Applications` 설치·앱 등록은 하지 않는다.
+Runtime 설치 성공은 DOCX 변환이나 실제 AI 분석 품질 검증 성공을 뜻하지 않는다.
 비텍스트 원본은 시각적 개인정보·Secret 검사를 보장할 수 없어 전송 전 별도 검토가 필요하다.
 기존 직접 HTTPS 동의/hash는 새 합성 payload와 별개다.
 

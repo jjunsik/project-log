@@ -17,6 +17,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from project_log.browser import Browser, Category
 from project_log.collections import Collections, Memo
 from project_log.db import RECORDS, Database, Row
+from project_log.experience_input import ExperienceInputs
+from project_log.experience_store import Experiences
+from project_log.experiences import ExperienceGraph, ExperienceModel
 from project_log.folders import Folders
 from project_log.git import CollectionError, diagnose
 from project_log.materials import FORMATS, Materials
@@ -43,6 +46,7 @@ def create_app(
     storage_root: Path | None = None,
     material_max_bytes: int | None = None,
     folder_home: Path | None = None,
+    experience_test_model: ExperienceModel | None = None,
 ) -> FastAPI:
     database = db or Database()
     projects = Projects(database)
@@ -51,6 +55,7 @@ def create_app(
     folders = Folders(database, folder_home)
     picker = NativePicker(folders)
     deletion = ProjectDeletion(database, materials)
+    experiences = Experiences(database)
     worker: Worker | None = None
 
     @asynccontextmanager
@@ -202,6 +207,52 @@ def create_app(
     @app.get("/api/projects/{project_id}/materials")
     def material_list(project_id: UUID) -> list[Row]:
         return materials.listing(str(project_id))
+
+    @app.get("/api/projects/{project_id}/experiences")
+    def experience_list(project_id: UUID) -> Row:
+        return {
+            "runs": experiences.listing(str(project_id)),
+            "transfer_enabled": False,
+            "execution_available": False,
+        }
+
+    @app.post("/api/projects/{project_id}/experiences", status_code=201)
+    def analyze_experiences(project_id: UUID) -> Row:
+        if experience_test_model is None:
+            # No key reads, input preparation, DB writes or model construction before this gate.
+            raise CollectionError(
+                "analysis_transfer_disabled", "실제 자료 분석은 아직 비활성입니다."
+            )
+        snapshot = ExperienceInputs(database, materials).prepare(str(project_id))
+        result = ExperienceGraph(experience_test_model).run(snapshot)
+        return experiences.save(snapshot, result, model="isolated-test-model")
+
+    @app.get("/api/projects/{project_id}/experiences/{run_id}")
+    def experience_detail(project_id: UUID, run_id: UUID) -> Row:
+        return experiences.detail(str(project_id), str(run_id))
+
+    @app.get("/api/projects/{project_id}/experiences/{run_id}/evidence")
+    def experience_evidence(
+        project_id: UUID, run_id: UUID, reference: str = Query(max_length=16000)
+    ) -> Row:
+        return experiences.evidence(str(project_id), str(run_id), reference)
+
+    @app.get("/api/projects/{project_id}/experiences/{run_id}/media")
+    def experience_media(
+        project_id: UUID,
+        run_id: UUID,
+        reference: str = Query(max_length=16000),
+        index: int = Query(ge=0),
+    ) -> Response:
+        item, raw = experiences.media(str(project_id), str(run_id), reference, index)
+        return Response(
+            raw,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": "attachment; filename=media; filename*=UTF-8''"
+                + quote(item["name"], safe=""),
+            },
+        )
 
     @app.put("/api/projects/{project_id}/materials", status_code=201)
     async def add_material(project_id: UUID, request: Request) -> Row:

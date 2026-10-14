@@ -155,8 +155,12 @@ class _SyntheticTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
     This transport is scoped to the synchronous stage-1 verification, not the future pipeline.
     """
 
-    def __init__(self, model: str):
-        self.inner = httpx.HTTPTransport(retries=0, verify=True, trust_env=False)
+    def __init__(self, model: str, *, inner: httpx.BaseTransport | None = None):
+        self.inner = (
+            inner
+            if inner is not None
+            else httpx.HTTPTransport(retries=0, verify=True, trust_env=False)
+        )
         self.endpoint = f"https://{HOST}/v1beta/models/{model}:generateContent"
         self.attempted = False
         self.usage_json = "{}"

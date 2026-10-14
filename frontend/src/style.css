@@ -48,3 +48,15 @@
 .sticky-top>.breadcrumbs{padding-right:145px}
 .toast{top:36px}
 @media(max-width:650px){.theme-control{right:10px}.sidebar>.brand{padding-right:145px}.toast{top:36px}}
+.experience-layout {display:grid;grid-template-columns:minmax(220px,1fr) minmax(0,3fr);gap:20px;margin-top:20px;align-items:start;}
+.experience-list button {display:flex;width:100%;gap:10px;text-align:left;white-space:normal;margin-bottom:10px;}
+.experience-list .selected {outline:2px solid var(--accent);}
+.experience-claim {padding:12px 0;border-bottom:1px solid var(--border);}
+.experience-citation {padding-left:12px;}
+.experience-citation button {display:block;max-width:100%;text-align:left;margin:8px 0;white-space:normal;overflow-wrap:anywhere;}
+.experience-citation blockquote {margin:10px 0;white-space:pre-wrap;overflow-wrap:anywhere;}
+.experience-body {max-height:500px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}
+.experience-evidence {margin-top:20px;}
+.experiences > .card {margin-bottom:20px;}
+.experiences label select {display:block;max-width:100%;margin-top:10px;}
+@media (max-width:800px) {.experience-layout {grid-template-columns:1fr;}}

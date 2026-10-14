@@ -4,6 +4,7 @@ import ProjectCard from './ProjectCard';
 import ThemeControl from './ThemeControl';
 import Browser from './Browser';
 import Materials from './Materials';
+import Experiences from './Experiences';
 import ProjectForm from './ProjectForm';
 import {Commits, Documents, CommitDetail, DocumentDetail} from './Evidence';
 import {useData, type FileNode} from './data';
@@ -11,7 +12,7 @@ import {Icon, Modal, Pagination, PageCount, Text, MemoFields, date, message, del
 import {HistoryPages, readVisit, sameLocation, visitState, type Screen, type Visit} from './navigation';
 
 interface Overview {selected: {counts: Record<'commits' | 'files' | 'documents', number | null>}; previous: {counts: Record<'commits' | 'files' | 'documents', number | null>} | null; delta: Record<'commits' | 'files' | 'documents', number | null>}
-const names: Record<Screen,string> = {projects:'등록된 프로젝트 목록',dashboard:'대시보드',collections:'수집 기록',commits:'커밋',documents:'개발 문서',materials:'사용자 추가 자료',files:'수집 당시 프로젝트 구조',settings:'프로젝트 설정',add:'프로젝트 추가',commit:'커밋 상세',document:'문서 상세'};
+const names: Record<Screen,string> = {projects:'등록된 프로젝트 목록',dashboard:'대시보드',collections:'수집 기록',commits:'커밋',documents:'개발 문서',materials:'사용자 추가 자료',experiences:'개발 경험',files:'수집 당시 프로젝트 구조',settings:'프로젝트 설정',add:'프로젝트 추가',commit:'커밋 상세',document:'문서 상세'};
 function CollectionsTable({records, selected, move, edit, remove}: {records: Collection[]; selected: string; move: (c: Collection) => void; edit: (c: Collection) => void; remove: (c: Collection) => void}) {
   return <div className="table-scroll"><table className="collections-table"><thead><tr><th>번호</th><th>제목</th><th>설명</th><th>브랜치</th><th>수집 시각</th><th>작업</th></tr></thead><tbody>{records.map(c => <tr key={c.id} className={c.id === selected ? 'selected-row' : ''}><td>#{c.number}</td><td><Text text={c.title || '—'}/></td><td><Text text={c.description || '—'}/></td><td><Text text={c.snapshot.branch ?? '미확보'}/></td><td>{date(c.snapshot.started_at ?? c.created_at)}</td><td><div className="actions"><span className="move-slot">{c.id === selected ? <span className="badge current">현재 선택됨</span> : <button onClick={() => move(c)}>이 수집으로 이동</button>}</span><button onClick={() => edit(c)}>수정</button><button className="danger" onClick={() => remove(c)}>삭제</button></div></td></tr>)}</tbody></table>{!records.length && <p className="hint">완료된 수집 기록이 없습니다.</p>}</div>;
 }
@@ -135,7 +136,7 @@ export default function App() {
   return <HistoryPages value={{pages,setPages}}><div className="app-shell"><ThemeControl/><aside className="sidebar">
     <button className="brand" onClick={()=>navigate('projects')}>PROJECT LOG</button><p>개발의 흔적을 체계적으로.</p>
     <div ref={switcherRef}><button className="project-switch" aria-label={`프로젝트 선택: ${project?.name ?? '없음'}`} aria-expanded={switcher} onClick={() => setSwitcher(!switcher)}><Icon name="folder"/><Text text={project?.name ?? '프로젝트 선택'}/>⌄</button>{switcher && <div className="project-menu"><input aria-label="프로젝트 검색" placeholder="프로젝트 이름 검색" value={search} onChange={e => setSearch(e.target.value)}/>{projects.filter(p=>p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(p=><button key={p.id} aria-current={screen!=='add' && p.id===project?.id ? 'true' : undefined} onClick={()=>switchProject(p)}><Text text={p.name}/>{screen!=='add' && p.id===project?.id && <span><Icon name="check"/> 선택됨</span>}</button>)}<button onClick={()=>navigate('add')}>＋ 프로젝트 추가</button></div>}</div>
-    <nav><button disabled={!project || screen==='add'} className={screen==='dashboard'?'active':''} onClick={()=>navigate('dashboard')}><Icon name="home"/> 대시보드</button><button disabled={!project || screen==='add'} className={screen==='settings'?'active':''} onClick={()=>navigate('settings')}><Icon name="settings"/> 프로젝트 설정</button></nav>
+    <nav><button disabled={!project || screen==='add'} className={screen==='dashboard'?'active':''} onClick={()=>navigate('dashboard')}><Icon name="home"/> 대시보드</button><button disabled={!project || screen==='add'} className={screen==='experiences'?'active':''} onClick={()=>navigate('experiences')}><Icon name="book"/> 개발 경험</button><button disabled={!project || screen==='add'} className={screen==='settings'?'active':''} onClick={()=>navigate('settings')}><Icon name="settings"/> 프로젝트 설정</button></nav>
     <div className="sidebar-foot"><p className="quality-note">ⓘ 수집 자료의 양과 품질에 따라 향후 생성되는 결과물의 품질이 달라질 수 있습니다.</p><small>Local Project Log · v0.1.0</small></div>
     </aside><main>
     <div className="sticky-top"><nav className="breadcrumbs" aria-label="Breadcrumb">{project && screen!=='projects' && screen!=='add' && <><Text text={project.name}/><span>›</span></>}{hierarchy.map((item,i)=><span className="crumb" key={item}>{i>0 && <span>› </span>}{i===hierarchy.length-1 ? <Text text={item==='document' ? document?.name ?? '문서' : names[item]}/> : <button onClick={()=>navigate(item)}>{names[item]}</button>}</span>)}</nav>
@@ -154,6 +155,7 @@ export default function App() {
       {baseScreen==='commits' && collection && <Commits key={collection.id} collection={collection} open={c=>openCommit(c.oid)}/>}
       {baseScreen==='documents' && collection && <Documents key={collection.id} collection={collection} open={openDocument}/>}
       {baseScreen==='materials' && <Materials key={project.id} projectId={project.id} confirm={confirm} notify={notify}/>}
+      {baseScreen==='experiences' && <Experiences key={project.id} projectId={project.id}/>}
       {baseScreen==='files' && collection && <section className="card"><h2>수집 당시 프로젝트 구조</h2><Browser key={collection.id} collection={collection}/></section>}
     </>}
     </div>
