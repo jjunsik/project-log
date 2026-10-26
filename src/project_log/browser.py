@@ -184,6 +184,17 @@ class Browser:
 
     def documents(self, collection: str, limit: int, offset: int) -> Row:
         self.db.detail(collection)
+
+        def document_order(item: tuple[bytes, list[Row]]) -> tuple[bool, int, bytes]:
+            path, variants = item
+            # Match the observation used for the modification date in the document list.
+            preferred = next(
+                (v for v in variants if v["layer"] in {"working", "document", "untracked"}),
+                variants[0],
+            )
+            mtime = preferred["metadata"].get("mtime_ns")
+            return mtime is None, -mtime if mtime is not None else 0, path
+
         items = [
             {
                 **path_info(path),
@@ -191,7 +202,7 @@ class Browser:
                 "directory": False,
                 "observations": variants,
             }
-            for path, variants in sorted(self.inventory(collection).items())
+            for path, variants in sorted(self.inventory(collection).items(), key=document_order)
             if path.startswith(b"docs/")
         ]
         return {"total": len(items), "items": items[offset : offset + limit]}

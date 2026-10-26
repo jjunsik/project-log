@@ -1,6 +1,6 @@
 import {test as base, expect} from '@playwright/test';
 import {execFileSync, spawn} from 'node:child_process';
-import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, unlinkSync, utimesSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 
 const test = base.extend<{backend: string; legacy: boolean; slow: boolean; experience: boolean}>({
@@ -402,15 +402,24 @@ test('page two and scroll survive commit/document detail return; materials use t
     execFileSync('git',['-C',repo,'-c','core.hooksPath=/dev/null','add','README.md']);
     execFileSync('git',['-C',repo,'-c','core.hooksPath=/dev/null','commit','-m',`commit ${i}\n\nBody ${i}`],{stdio:'ignore'});
     writeFileSync(join(repo,'docs',`doc-${i}.md`),`observed document ${i}\n`);
+    utimesSync(join(repo,'docs',`doc-${i}.md`),1_700_000_000+i,1_700_000_000+i);
   }
+  utimesSync(join(repo,'docs/decisions/local.md'),1_700_000_000-1,1_700_000_000-1);
   await register(page); const p=await completed(request);
+  const documentNames=Array.from({length:11},(_,i)=>`doc-${10-i}.md`).concat('decisions/local.md');
+  const documentRows=page.locator('.documents-table tbody tr td:first-child .truncate');
+  await expect(documentRows).toHaveText(documentNames.slice(0,3));
   const commitCard=page.locator('.card').filter({has:page.getByRole('heading',{name:'최근 커밋',exact:true})});
   await commitCard.getByRole('button',{name:'전체 보기 →'}).click();
   await page.getByRole('button',{name:'2',exact:true}).click(); await expect(page.locator('.page-count')).toHaveText('2 / 2 · 총 12개');
   await page.evaluate(()=>window.scrollTo(0,120)); const before=await page.evaluate(()=>scrollY);
   await page.getByRole('button',{name:'상세 보기'}).first().click(); await page.getByRole('button',{name:'← 커밋으로 돌아가기'}).click(); await expect(page.locator('.page-count')).toHaveText('2 / 2 · 총 12개'); await expect.poll(()=>page.evaluate(()=>scrollY)).toBe(before);
-  await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click(); await page.locator('.two-columns>.card').first().getByRole('button',{name:'전체 보기 →'}).click(); await page.getByRole('button',{name:'2',exact:true}).click(); await expect(page.locator('.page-count')).toHaveText('2 / 2 · 총 12개');
+  await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click(); await page.locator('.two-columns>.card').first().getByRole('button',{name:'전체 보기 →'}).click();
+  await expect(documentRows).toHaveText(documentNames.slice(0,10));
+  await page.getByRole('button',{name:'2',exact:true}).click(); await expect(page.locator('.page-count')).toHaveText('2 / 2 · 총 12개');
+  await expect(documentRows).toHaveText(documentNames.slice(10));
   await page.getByRole('button',{name:'상세 보기'}).first().click(); await page.getByRole('button',{name:'← 개발 문서로 돌아가기'}).click(); await expect(page.locator('.page-count')).toHaveText('2 / 2 · 총 12개');
+  await expect(documentRows).toHaveText(documentNames.slice(10));
   for(let i=0;i<11;i++)expect((await request.put(`/api/projects/${p.id}/materials`,{data:Buffer.from(`material ${i}`),headers:{'Content-Type':'application/octet-stream','X-File-Name':`file-${i}.txt`}})).ok()).toBe(true);
   await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click(); await page.locator('.user-materials').getByRole('button',{name:'전체 보기 →'}).click(); await expect(page.locator('.user-materials tbody tr')).toHaveCount(10); await page.getByRole('button',{name:'2',exact:true}).click(); await expect(page.locator('.user-materials tbody tr')).toHaveCount(1); await page.locator('.user-materials tbody').getByRole('button',{name:/삭제/}).click(); await approve(page); await expect(page.locator('.page-count')).toHaveText('1 / 1 · 총 10개');
 });

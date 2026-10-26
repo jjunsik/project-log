@@ -324,6 +324,38 @@ def test_flat_documents_use_observed_metadata_and_ten_item_pages(db, git, tmp_pa
     assert o["metadata"]["mtime_ns"] > 0 and o["metadata"]["size"] == len(body)
 
 
+def test_flat_documents_sort_by_displayed_mtime_before_pagination(db, git, tmp_path, monkeypatch):
+    _, _, cid = completed(db, git, tmp_path)
+    browser = Browser(db)
+    inventory = {
+        b"docs/a-missing.md": [{"layer": "head", "metadata": {}}],
+        b"docs/b-old.md": [{"layer": "document", "metadata": {"mtime_ns": 1}}],
+        b"docs/c-tie.md": [{"layer": "untracked", "metadata": {"mtime_ns": 2}}],
+        b"docs/d-tie.md": [{"layer": "document", "metadata": {"mtime_ns": 2}}],
+        b"docs/e-new.md": [
+            {"layer": "index", "metadata": {"mtime_ns": 0}},
+            {"layer": "working", "metadata": {"mtime_ns": 3}},
+        ],
+        b"docs/f-zero.md": [{"layer": "document", "metadata": {"mtime_ns": 0}}],
+        b"docs/g-null.md": [{"layer": "working", "metadata": {"mtime_ns": None}}],
+        b"src/code.py": [{"layer": "working", "metadata": {"mtime_ns": 99}}],
+    }
+    monkeypatch.setattr(browser, "inventory", lambda _: inventory)
+    expected = [
+        "e-new.md",
+        "c-tie.md",
+        "d-tie.md",
+        "b-old.md",
+        "f-zero.md",
+        "a-missing.md",
+        "g-null.md",
+    ]
+    for offset in (0, 3, 6):
+        page = browser.documents(cid, 3, offset)
+        assert page["total"] == len(expected)
+        assert [item["name"] for item in page["items"]] == expected[offset : offset + 3]
+
+
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
 def test_current_git_object_damage_is_not_downgraded_to_historical_warning(
     db, git, tmp_path, damage
