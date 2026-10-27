@@ -14,6 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from project_log.analysis_api import configured_profile, execution_available, public_profile, router
+from project_log.analysis_child import ModelFactory
+from project_log.analysis_worker import AnalysisWorker
 from project_log.browser import Browser, Category
 from project_log.collections import Collections, Memo
 from project_log.db import RECORDS, Database, Row
@@ -26,7 +29,7 @@ from project_log.materials import FORMATS, Materials
 from project_log.native_picker import NativePicker
 from project_log.project_deletion import DeleteProject, ProjectDeletion
 from project_log.service import Projects, Registration, Settings
-from project_log.worker import Worker
+from project_log.worker import AppOwnership, Worker
 
 
 class Diagnosis(BaseModel):
@@ -47,7 +50,12 @@ def create_app(
     material_max_bytes: int | None = None,
     folder_home: Path | None = None,
     experience_test_model: ExperienceModel | None = None,
+    analysis_profile: Row | None = None,
+    analysis_model_factory: ModelFactory | None = None,
 ) -> FastAPI:
+    analysis_profile = (
+        public_profile(analysis_profile) if analysis_profile is not None else configured_profile()
+    )
     database = db or Database()
     projects = Projects(database)
     browser = Browser(database)
@@ -57,26 +65,52 @@ def create_app(
     deletion = ProjectDeletion(database, materials)
     experiences = Experiences(database)
     worker: Worker | None = None
+    analysis: AnalysisWorker | None = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        nonlocal worker
-        database.migrate()
-        deletion.recover()
-        if start_worker:
-            worker = Worker(database)
-            worker.start()
+        nonlocal worker, analysis
+        ownership = AppOwnership(database) if start_worker else None
         try:
+            database.migrate()
+            if ownership:
+                analysis = AnalysisWorker(
+                    database,
+                    materials,
+                    ownership,
+                    profile=analysis_profile,
+                    model_factory=analysis_model_factory,
+                )
+                analysis.recover()
+                _app.state.analysis_worker = analysis
+            deletion.recover()
+            if ownership:
+                worker = Worker(database, ownership)
+                worker.start()
+                assert analysis is not None
+                analysis.start()
             yield
         finally:
             folders.close()
             if worker:
-                worker.close()
+                worker.stop_event.set()
+            try:
+                if analysis:
+                    analysis.close()
+            finally:
+                try:
+                    if worker:
+                        worker.close()
+                finally:
+                    if ownership:
+                        ownership.close()
 
     app = FastAPI(title="Project Log", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "testserver"]
     )
+
+    app.include_router(router(database, lambda: analysis))
 
     @app.middleware("http")
     async def local_only(request: Request, call_next: Any) -> Any:
@@ -138,11 +172,19 @@ def create_app(
             404
             if exc.code == "not_found"
             else 409
-            if exc.code in {"duplicate", "conflict", "filename_conflict", "content_duplicate"}
+            if exc.code
+            in {
+                "duplicate",
+                "conflict",
+                "filename_conflict",
+                "content_duplicate",
+                "analysis_active",
+            }
             else 413
             if exc.code == "file_too_large"
             else 503
-            if exc.code in {"storage_failed", "storage_corrupt"}
+            if exc.code
+            in {"storage_failed", "storage_corrupt", "analysis_unavailable", "analysis_owner_lost"}
             else 422
         )
         return JSONResponse({"code": exc.code, "detail": exc.message}, status_code=status)
@@ -164,6 +206,7 @@ def create_app(
             "database": "ready",
             "worker_error": worker.error if worker else None,
             "worker_running": bool(worker and worker.thread.is_alive()),
+            "analysis_error": analysis.error if analysis else None,
         }
 
     @app.post("/api/repositories/diagnose")
@@ -187,7 +230,9 @@ def create_app(
             c.created_at AS collection_created_at,
             c.snapshot->>'started_at' AS collection_observed_at,
             EXISTS (SELECT 1 FROM collections a WHERE a.project_id=p.id
-                    AND a.state<>'completed') AS collection_busy
+                    AND a.state<>'completed') AS collection_busy,
+            EXISTS (SELECT 1 FROM analysis_requests r WHERE r.project_id=p.id
+                    AND r.state IN ('queued','running','cancel_requested')) AS analysis_active
             FROM projects p LEFT JOIN LATERAL
             (SELECT id,state,summary,created_at,snapshot FROM collections WHERE project_id=p.id
                  AND state IN ('completed','capturing','queued','running','cancel_pending')
@@ -210,10 +255,13 @@ def create_app(
 
     @app.get("/api/projects/{project_id}/experiences")
     def experience_list(project_id: UUID) -> Row:
+        available = execution_available(database, analysis)
         return {
             "runs": experiences.listing(str(project_id)),
-            "transfer_enabled": False,
-            "execution_available": False,
+            "transfer_enabled": bool(
+                available and analysis and analysis.profile and analysis.profile["mode"] == "live"
+            ),
+            "execution_available": available,
         }
 
     @app.post("/api/projects/{project_id}/experiences", status_code=201)

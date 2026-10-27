@@ -4,6 +4,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -158,6 +159,36 @@ def test_shared_file_serializes_reservations(tmp_path):
     assert len(set(ids)) == state(q)["count"] == 12
 
 
+def test_opt_in_disabled_is_inert_and_live_factory_connects_only_explicit_configuration(
+    tmp_path, monkeypatch
+):
+    from project_log.analysis_child import gemini_model
+
+    monkeypatch.setattr(
+        GeminiConfig,
+        "from_environment",
+        lambda **_: GeminiConfig("gemini-3.5-flash-lite", "synthetic-key", True),
+    )
+    profile = {"mode": "live", "free_tier_confirmed": True, "model": "gemini-3.5-flash-lite"}
+    monkeypatch.delenv("PROJECT_LOG_GEMINI_FREE_LIMITS", raising=False)
+    assert from_environment(stopped=threading.Event()) is None
+    assert gemini_model(profile, lambda _: None, stopped=threading.Event()).quota is None
+    monkeypatch.setenv("PROJECT_LOG_GEMINI_FREE_LIMITS", "1")
+    monkeypatch.setenv("PROJECT_LOG_GEMINI_MODEL", "gemini-3.5-flash-lite")
+    monkeypatch.setenv("PROJECT_LOG_GEMINI_FREE_LIMITS_STATE", str(tmp_path / "quota.json"))
+    stopped = threading.Event()
+    adapter = gemini_model(
+        profile,
+        lambda _: None,
+        stopped=stopped,
+    )
+    assert isinstance(adapter, GeminiExperienceModel) and adapter.quota.stopped is stopped
+    assert not list(tmp_path.iterdir())
+    monkeypatch.setenv("PROJECT_LOG_GEMINI_FREE_LIMITS_STATE", "relative.json")
+    with pytest.raises(CollectionError):
+        from_environment(stopped=stopped)
+
+
 def test_failed_reservation_write_prevents_http_and_preserves_prior_count(tmp_path, monkeypatch):
     q = quota(tmp_path)
     q.reserve(RAW, lambda: None)
@@ -243,3 +274,134 @@ def test_sdk_failure_no_429_or_ambiguous_resend_and_persistent_attempts(tmp_path
         with pytest.raises(CollectionError) as exc:
             quota(tmp_path).reserve(RAW, lambda: pytest.fail("Known daily exhaustion persists"))
         assert exc.value.code == "gemini_free_daily_limit"
+
+
+def free_worker_factory(profile, gate):
+    """Spawn fixture, with exactly the normal SDK transport and existing call gate."""
+    directory = Path(profile["test_directory"])
+    mode = profile["test_mode"]
+    stopped = gate.__self__.stopped
+    clock = Clock()
+    q = quota(directory, clock, stopped=stopped)
+    if mode in {"free_cancel", "free_restart"}:
+        for _ in range(RPM):
+            q.reserve(RAW, lambda: None)
+
+        def waiting(seconds):
+            (directory / "quota-wait").touch()
+            return stopped.wait(seconds)
+
+        q.wait = waiting
+    if mode == "free_daily":
+        q.reserve(RAW, lambda: None)
+        saved = state(q)
+        saved["count"] = RPD
+        q.save(saved)
+
+    calls = []
+
+    def transport():
+        connection = ModelConnection(retries=0, verify=True, trust_env=False)
+        if mode == "free_429":
+            connection.status = 429
+        if mode == "free_503" or (mode == "free_503once" and not calls):
+            connection.status = 503
+        calls.append(connection)
+        return connection
+
+    return GeminiExperienceModel(
+        GeminiConfig("gemini-3.5-flash-lite", "synthetic-key", True),
+        before_send=gate,
+        test_transport_factory=transport,
+        quota=q,
+    )
+
+
+@pytest.mark.parametrize(
+    "mode,expected,calls",
+    [
+        ("free_success", "completed", None),
+        ("free_daily", "failed", 0),
+        ("free_429", "failed", 1),
+        ("free_503", "failed", 2),
+        ("free_503once", "completed", None),
+    ],
+)
+def test_worker_quota_success_or_failure_keeps_existing_result_and_attempt_policy(
+    db, tmp_path, mode, expected, calls
+):
+    from test_analysis_worker import accepted, setup_worker, stop, terminal
+
+    pid, cid, store, owner, worker, directory = setup_worker(db, tmp_path, mode)
+    worker.factory = free_worker_factory
+    try:
+        request, _ = accepted(worker, pid, cid)
+        worker.start()
+        row = terminal(worker, pid, request)
+        assert row["state"] == expected
+        actual = len(db.all("SELECT * FROM analysis_calls WHERE request_id=%s", (request,)))
+        assert calls is None or actual == calls
+        recorded = json.loads((directory / "quota.json").read_text())["count"]
+        assert recorded == (RPD if mode == "free_daily" else actual)
+        assert bool(row["result_run_id"]) == (expected == "completed")
+        if mode == "free_daily":
+            assert row["error_code"] == "gemini_free_daily_limit"
+        if mode in {"free_503", "free_503once"}:
+            ledger = db.all("SELECT * FROM analysis_calls ORDER BY seq")
+            assert ledger[0]["error_code"] == "provider_temporarily_unavailable"
+            assert ledger[0]["payload_digest"] == ledger[1]["payload_digest"]
+            assert (ledger[1]["entered_at"] - ledger[0]["finished_at"]).total_seconds() >= 30
+            assert ledger[1]["outcome"] == ("failed" if mode == "free_503" else "responded")
+            if mode == "free_503once":
+                run = db.one(
+                    "SELECT result FROM experience_runs WHERE id=%s", (row["result_run_id"],)
+                )
+                assert actual == run["result"]["model_calls"] + 1
+        store.add(pid, "released.md", b"Synthetic unlocked after terminal result")
+    finally:
+        stop(worker, owner)
+
+
+@pytest.mark.parametrize("mode", ["free_cancel", "free_restart"])
+def test_worker_cancel_or_shutdown_while_quota_waits_sends_no_call(db, tmp_path, mode):
+    from test_analysis_worker import accepted, setup_worker, stop, terminal, wait_for
+
+    from project_log.analysis_worker import AnalysisWorker
+
+    pid, cid, store, owner, worker, directory = setup_worker(db, tmp_path, mode)
+    worker.factory = free_worker_factory
+    try:
+        request, _ = accepted(worker, pid, cid)
+        worker.start()
+        wait_for(lambda: (directory / "quota-wait").exists())
+        if mode == "free_cancel":
+            worker.state.cancel(pid, request)
+            assert terminal(worker, pid, request)["state"] == "cancelled"
+        else:
+            worker.close()
+            row = worker.admission.request(pid, request)
+            assert row["state"] == "failed" and row["error_code"] == "failed_server_stopped"
+        assert db.all("SELECT * FROM analysis_calls") == []
+        assert json.loads((directory / "quota.json").read_text())["count"] == RPM
+        if mode == "free_restart":
+            restarted = AnalysisWorker(
+                db,
+                store,
+                owner,
+                profile={**worker.profile, "test_mode": "free_success"},
+                model_factory=free_worker_factory,
+            )
+            restarted.recover()
+            restarted.state.open()
+            try:
+                assert restarted.once() is False  # No automatic request/analysis restart.
+                next_request, _ = accepted(restarted, pid, cid)
+                restarted.start()
+                assert terminal(restarted, pid, next_request)["state"] == "completed"
+                actual = len(db.all("SELECT * FROM analysis_calls"))
+                assert json.loads((directory / "quota.json").read_text())["count"] == RPM + actual
+                assert restarted.admission.request(pid, request)["state"] == "failed"
+            finally:
+                restarted.close()
+    finally:
+        stop(worker, owner)

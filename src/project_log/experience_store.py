@@ -4,6 +4,7 @@ import base64
 import json
 from uuid import uuid4
 
+import psycopg
 from psycopg.types.json import Jsonb
 
 from project_log.db import Database, Row
@@ -30,51 +31,68 @@ class Experiences:
                 "analysis_input_mismatch",
                 "입력 버전이 다르거나 실제 전송 저장 경로가 비활성입니다.",
             )
-        run = str(uuid4())
         with self.db.connect() as conn:
             if not conn.execute(
                 "SELECT id FROM projects WHERE id=%s FOR UPDATE", (snapshot.project_id,)
             ).fetchone():
                 raise CollectionError("not_found", "해당 프로젝트가 없습니다.")
+            run = self.insert(conn, snapshot, result, model=model, mode=mode)
+        return self.detail(snapshot.project_id, run)
+
+    def insert(
+        self,
+        conn: psycopg.Connection[Row],
+        snapshot: ExperienceInput,
+        result: AnalysisResult,
+        *,
+        model: str,
+        mode: str,
+    ) -> str:
+        """Caller owns Project/request locks and the encompassing commit."""
+        if result.input_digest != snapshot.digest or mode not in {"isolated", "live"}:
+            raise CollectionError(
+                "analysis_input_mismatch", "고정 입력과 결과가 일치하지 않습니다."
+            )
+        run = str(uuid4())
+        conn.execute(
+            """INSERT INTO experience_runs
+            (id,project_id,input_digest,input_manifest,result,model,mode)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                run,
+                snapshot.project_id,
+                snapshot.digest,
+                Jsonb(snapshot.manifest()),
+                Jsonb(result.model_dump()),
+                model,
+                mode,
+            ),
+        )
+        for e in snapshot.entries:
             conn.execute(
-                """INSERT INTO experience_runs
-                (id,project_id,input_digest,input_manifest,result,model,mode)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                """INSERT INTO experience_evidence
+                (run_id,project_id,reference,source,body,media,reason,limitations)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     run,
                     snapshot.project_id,
-                    snapshot.digest,
-                    Jsonb(snapshot.manifest()),
-                    Jsonb(result.model_dump()),
-                    model,
-                    mode,
+                    e.reference,
+                    Jsonb(json.loads(e.source_json)),
+                    e.text,
+                    Jsonb(
+                        [
+                            {
+                                **m.descriptor(),
+                                "base64": base64.b64encode(m.raw).decode("ascii"),
+                            }
+                            for m in e.media
+                        ]
+                    ),
+                    e.reason,
+                    Jsonb(list(e.limitations)),
                 ),
             )
-            for e in snapshot.entries:
-                conn.execute(
-                    """INSERT INTO experience_evidence
-                    (run_id,project_id,reference,source,body,media,reason,limitations)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (
-                        run,
-                        snapshot.project_id,
-                        e.reference,
-                        Jsonb(json.loads(e.source_json)),
-                        e.text,
-                        Jsonb(
-                            [
-                                {
-                                    **m.descriptor(),
-                                    "base64": base64.b64encode(m.raw).decode("ascii"),
-                                }
-                                for m in e.media
-                            ]
-                        ),
-                        e.reason,
-                        Jsonb(list(e.limitations)),
-                    ),
-                )
-        return self.detail(snapshot.project_id, run)
+        return run
 
     def listing(self, project: str) -> list[Row]:
         self.db.one("SELECT id FROM projects WHERE id=%s", (project,))

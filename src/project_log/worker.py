@@ -7,19 +7,34 @@ from project_log.collector import collect
 from project_log.db import CollectionStopped, Database
 
 
-class Worker:
-    """One local worker per database; unfinished attempts are cleaned, never resumed."""
+class AppOwnership:
+    """Single app owner, acquired before migration and recovery."""
 
     def __init__(self, db: Database):
-        self.db = db
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self.loop, name="project-log-collector", daemon=True)
         self.lock = db.connect()
         self.lock.autocommit = True
         row = self.lock.execute("SELECT pg_try_advisory_lock(72304212) AS locked").fetchone()
         if not row or not row["locked"]:
             self.lock.close()
             raise RuntimeError("Another Project Log process is already using this database")
+
+    def check(self) -> None:
+        self.lock.execute("SELECT 1")
+
+    def close(self) -> None:
+        self.lock.close()
+
+
+class Worker:
+    """One local worker per database; unfinished attempts are cleaned, never resumed."""
+
+    def __init__(self, db: Database, ownership: AppOwnership | None = None):
+        self.db = db
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self.loop, name="project-log-collector", daemon=True)
+        self.ownership = ownership or AppOwnership(db)
+        self.owns_lock = ownership is None
+        self.lock = self.ownership.lock
         self.error: str | None = None
         self.pending_failure: str | None = None
 
@@ -36,7 +51,8 @@ class Worker:
         self.stop_event.set()
         if self.thread.is_alive():
             self.thread.join()
-        self.lock.close()
+        if self.owns_lock:
+            self.ownership.close()
 
     def cleanup(self) -> bool:
         rows = self.db.all(
