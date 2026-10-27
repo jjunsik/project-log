@@ -13,9 +13,9 @@ from project_log.db import Database, Row
 from project_log.document_media import prepare_pdf, render_docx
 from project_log.git import CollectionError, diagnose
 from project_log.materials import FORMATS, TEXT_FORMATS, Materials, validate_format
-from project_log.policy import MAX_BODY, has_secret, sensitive_path, sha256
+from project_log.policy import MAX_BODY, content_reason, sensitive_path, sha256
 
-EXPERIENCE_INPUT_POLICY = "experience-input-v2"
+EXPERIENCE_INPUT_POLICY = "experience-input-v3-user-reviewed"
 MAX_MEDIA_BYTES = 20 * MAX_BODY
 
 
@@ -27,7 +27,7 @@ def text_reason(raw: bytes) -> str | None:
         raw.decode("utf-8")
     except UnicodeError:
         return "non_utf8"
-    return "suspected_secret" if has_secret(raw) else None
+    return None
 
 
 @dataclass(frozen=True)
@@ -88,6 +88,8 @@ class ExperienceInput:
     collections_json: str
     entries: tuple[Evidence, ...]
     policy: str = EXPERIENCE_INPUT_POLICY
+    # Legacy snapshot decoding only; never used to authorize current transfers.
+    privacy_review_json: str = "{}"
 
     def manifest(self) -> Row:
         return {
@@ -96,6 +98,11 @@ class ExperienceInput:
             "collections": json.loads(self.collections_json),
             "policy": self.policy,
             "transfer_enabled": False,
+            **(
+                {"privacy_review": json.loads(self.privacy_review_json)}
+                if self.policy != EXPERIENCE_INPUT_POLICY
+                else {}
+            ),
             "entries": [
                 {
                     "reference": e.reference,
@@ -146,24 +153,20 @@ def pdf_media(
 def material_evidence(reference: str, source: Row, raw: bytes) -> Evidence:
     """Prepare native PDF/images or text + DOCX media; never execute embedded content.
 
-    Native media is untrusted and needs explicit human transmission review. A signature
-    or byte-level secret scan does not verify its visual content or authorize transfer.
+    Native media is untrusted and needs explicit human transmission review.
+    Format validation does not verify its visual content or authorize transfer.
     """
     filename = source["filename"]
     extension = Path(filename).suffix.lower()
     base = Evidence(reference, canonical(source))
-    if sensitive_path(filename):
-        return replace(base, reason="sensitive_path")
     try:
         validate_format(filename, raw)
         if len(raw) > MAX_MEDIA_BYTES:
             return replace(base, reason="media_size_limit")
         if extension in {".pdf", ".png", ".jpg", ".jpeg"}:
-            if has_secret(raw):
-                return replace(base, reason="suspected_secret")
             media: tuple[Media, ...] = (Media(filename, FORMATS[extension], raw),)
             native_limits: tuple[str, ...] = (
-                "native_media_requires_visual_privacy_review",
+                "native_media_requires_manual_review",
                 "native_media_content_not_locally_verified",
             )
             if extension == ".pdf":
@@ -206,15 +209,13 @@ def material_evidence(reference: str, source: Row, raw: bytes) -> Evidence:
                     continue
                 image = archive.read(info)
                 validate_format(info.filename, image)
-                if has_secret(image):
-                    return replace(base, reason="suspected_secret")
                 images.append(Media(info.filename, FORMATS[ext], image))
             if any(i.filename.startswith("word/embeddings/") for i in archive.infolist()):
                 limits.add("docx_embedded_attachments_unprocessed")
         if images:
             limits.update(
                 {
-                    "native_media_requires_visual_privacy_review",
+                    "native_media_requires_manual_review",
                     "docx_image_layout_and_text_association_not_preserved",
                 }
             )
@@ -238,7 +239,7 @@ def material_evidence(reference: str, source: Row, raw: bytes) -> Evidence:
             limits.update(
                 {
                     "docx_rendering_fidelity_unverified",
-                    "native_media_requires_visual_privacy_review",
+                    "native_media_requires_manual_review",
                 }
             )
         except (CollectionError, OSError, ValueError, ElementTree.ParseError) as exc:
@@ -265,9 +266,9 @@ class ExperienceInputs:
     def __init__(self, db: Database, materials: Materials):
         self.db, self.materials = db, materials
 
-    def prepare(self, project: str) -> ExperienceInput:
+    def prepare(self, project: str, *, end_collection: str | None = None) -> ExperienceInput:
         snapshot = AnalysisInput(self.db, self.materials).prepare(
-            project, enforce_total_budget=False
+            project, enforce_total_budget=False, end_collection=end_collection
         )
         return self.expand(snapshot)
 
@@ -406,7 +407,11 @@ class ExperienceInputs:
                             )
                         )
                     else:
-                        reason = reason or (text_reason(blob_raw) if blob_raw is not None else None)
+                        # Historical Git text follows the original Collection lookup policy.
+                        # Uploaded analysis materials above keep their separate technical checks.
+                        reason = reason or (
+                            content_reason(blob_raw) if blob_raw is not None else None
+                        )
                         entries.append(
                             Evidence(
                                 ref,

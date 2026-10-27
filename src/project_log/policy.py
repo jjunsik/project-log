@@ -30,6 +30,7 @@ POLICY = {
     "historical_source": "original_git_object_required",
 }
 
+
 _SECRET_MARKERS = (
     rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
     rb"|(?:ghp_|github_pat_|sk-proj-|sk-ant-)[A-Za-z0-9_-]{16,}"
@@ -39,33 +40,6 @@ _SECRET_MARKERS = (
     rb"\s*[\"']?\s*[:=]\s*[\"']?[a-z0-9_+/=-]{8,})"
 )
 SECRET = re.compile(_SECRET_MARKERS + rb"|(?i:[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@)")
-_BOUNDED_MARKERS = re.compile(
-    _SECRET_MARKERS.replace(
-        rb"\s*[\"']?\s*[:=]\s*[\"']?",
-        rb"\s*+(?:[\"']\s*+)?[:=]\s*+[\"']?",
-    )
-)
-_CREDENTIAL_URL = re.compile(rb"://[^\s/:]++:[^\s/@]++@")
-_SCHEME_BYTES = frozenset(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-")
-_SCHEME_LETTERS = frozenset(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
-
-def has_secret(raw: bytes) -> bool:
-    """Preserve detection rules without quadratic searches in large input.
-
-    The original compiled pattern remains for collector/phase-1 callers. Stage-2
-    searches the fixed :// separator, then checks a possible letter-starting
-    scheme suffix. No detector length cap, masking, or criteria relaxation.
-    """
-    if _BOUNDED_MARKERS.search(raw):
-        return True
-    for match in _CREDENTIAL_URL.finditer(raw):
-        position = match.start() - 1
-        while position >= 0 and raw[position] in _SCHEME_BYTES:
-            if raw[position] in _SCHEME_LETTERS:
-                return True
-            position -= 1
-    return False
 
 
 def sensitive_path(path: str) -> bool:

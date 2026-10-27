@@ -29,7 +29,10 @@ def test_all_text_upload_formats_and_large_body_chunking(ext):
     raw = b"counter " * (MAX_BODY // 8 + 1)
     result = material("sample." + ext, raw)
     assert result.text.encode() == raw and result.reason is None
-    assert material("sample." + ext, b"api_key=syntheticsecretvalue").reason == "suspected_secret"
+    assert (
+        material("sample." + ext, b"api_key=syntheticsecretvalue").text
+        == "api_key=syntheticsecretvalue"
+    )
     assert material("sample." + ext, b"x\0y").reason == "invalid_format"
 
 
@@ -47,13 +50,10 @@ def test_native_media_preparation_is_not_content_verification(ext, raw, mime):
     assert result.reason is None and result.text is None
     assert len(result.media) == 1 and result.media[0].raw == raw
     assert result.media[0].mime_type == mime
-    assert "native_media_requires_visual_privacy_review" in result.limitations
+    assert "native_media_requires_manual_review" in result.limitations
     assert "native_media_content_not_locally_verified" in result.limitations
-    assert material("credentials." + ext, raw).reason == "sensitive_path"
-    assert (
-        material("sample." + ext, raw + b" api_key=syntheticsecretvalue").reason
-        == "suspected_secret"
-    )
+    assert material("credentials." + ext, raw).reason is None
+    assert material("sample." + ext, raw + b" api_key=syntheticsecretvalue").reason is None
     assert material("sample." + ext, b"invalid").reason == "invalid_format"
 
 
@@ -81,8 +81,8 @@ def test_docx_text_images_and_unsupported_components_remain_visible():
         == "docx_tracked_changes_requires_review"
     )
     assert (
-        material("sample.docx", docx(word("api_key=syntheticsecretvalue"))).reason
-        == "suspected_secret"
+        material("sample.docx", docx(word("api_key=syntheticsecretvalue"))).text
+        == "api_key=syntheticsecretvalue"
     )
 
 

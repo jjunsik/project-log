@@ -12,9 +12,9 @@ from xml.etree import ElementTree
 from project_log.db import RECORDS, Database, Row
 from project_log.git import CollectionError
 from project_log.materials import TEXT_FORMATS, Materials, validate_format
-from project_log.policy import MAX_BODY, content_reason, sensitive_path, sha256
+from project_log.policy import MAX_BODY, sensitive_path, sha256
 
-INPUT_POLICY = "analysis-input-v1"
+INPUT_POLICY = "analysis-input-v2-user-reviewed"
 MAX_INPUT_BYTES = 16 * MAX_BODY
 WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
@@ -136,10 +136,21 @@ def docx_text(raw: bytes) -> tuple[bytes, tuple[str, ...]]:
         raise CollectionError("invalid_docx", "DOCX의 안전한 텍스트 추출에 실패했습니다.") from exc
 
 
+def input_content_reason(raw: bytes) -> str | None:
+    """Technical decoding only; Collection security exclusions come from stored records."""
+    if len(raw) > MAX_BODY:
+        return "large"
+    if b"\0" in raw:
+        return "binary"
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "non_utf8"
+    return None
+
+
 def material_text(filename: str, raw: bytes) -> tuple[bytes | None, str | None, tuple[str, ...]]:
     extension = Path(filename).suffix.lower()
-    if sensitive_path(filename):
-        return None, "sensitive_path", ()
     if extension not in TEXT_FORMATS | {".docx"}:
         return None, "format_processing_pending", ()
     try:
@@ -149,7 +160,7 @@ def material_text(filename: str, raw: bytes) -> tuple[bytes | None, str | None, 
         else:
             body, limitations = raw.decode("utf-8-sig").encode(), ()
         reason = (
-            content_reason(body)
+            input_content_reason(body)
             or ("no_extractable_text" if not body else None)
             or (
                 "docx_tracked_changes_requires_review"
@@ -167,7 +178,9 @@ class AnalysisInput:
         self.db = db
         self.materials = materials
 
-    def prepare(self, project: str, *, enforce_total_budget: bool = True) -> InputSnapshot:
+    def prepare(
+        self, project: str, *, enforce_total_budget: bool = True, end_collection: str | None = None
+    ) -> InputSnapshot:
         """Freeze completed observations in one read-only DB snapshot; no current source reads.
 
         This is preparation, not an accepted analysis request. Long-lived project mutation
@@ -185,10 +198,8 @@ class AnalysisInput:
             limitations: tuple[str, ...] = (),
         ) -> None:
             nonlocal used
-            if any(sensitive_path(path) for path in paths):
-                reason = "sensitive_path"
             if not reason and body is not None:
-                reason = content_reason(body)
+                reason = input_content_reason(body)
             if not reason and body is None:
                 reason = "body_not_preserved"
             if (
@@ -223,12 +234,25 @@ class AnalysisInput:
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             if not conn.execute("SELECT id FROM projects WHERE id=%s", (project,)).fetchone():
                 raise CollectionError("not_found", "해당 Project가 없습니다.")
+            end = None
+            if end_collection is not None:
+                end = conn.execute(
+                    "SELECT created_at,id FROM collections "
+                    "WHERE project_id=%s AND id=%s AND state='completed'",
+                    (project, end_collection),
+                ).fetchone()
+                if end is None:
+                    raise CollectionError(
+                        "analysis_end_unavailable", "완료된 종료 수집을 선택하세요."
+                    )
             collections = conn.execute(
                 "SELECT id,kind,retry_of,baseline_id,snapshot,policy,"
                 "created_at,started_at,finished_at "
                 "FROM collections "
-                "WHERE project_id=%s AND state='completed' ORDER BY created_at,id",
-                (project,),
+                "WHERE project_id=%s AND state='completed' "
+                + ("AND (created_at,id)<=(%s,%s) " if end else "")
+                + "ORDER BY created_at,id",
+                (project, end["created_at"], end["id"]) if end else (project,),
             ).fetchall()
             for collection in collections:
                 cid = str(collection["id"])
@@ -311,7 +335,9 @@ class AnalysisInput:
                                 ref,
                                 source,
                                 None,
-                                path_reason or "historical_source_not_preserved",
+                                path_reason
+                                or ("sensitive_path" if sensitive_path(name) else None)
+                                or "historical_source_not_preserved",
                                 (name,),
                             )
             # Use this transaction's version, not a subsequent listing after an upload.

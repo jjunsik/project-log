@@ -18,7 +18,7 @@ from xml.etree import ElementTree
 
 from project_log.analysis_input import canonical
 from project_log.git import CollectionError
-from project_log.policy import MAX_BODY, has_secret, sha256
+from project_log.policy import MAX_BODY, sha256
 
 MAX_ORIGINAL_BYTES = 20 * MAX_BODY
 MAX_RENDERED_BYTES = 64 * MAX_BODY
@@ -303,7 +303,7 @@ def render_input(raw: bytes) -> tuple[bytes, tuple[str, ...]]:
             if not lower.endswith((".xml", ".rels", ".svg")) and name not in xml_parts:
                 continue
             data = archive.read(info)
-            if b"<!DOCTYPE" in data or b"<!ENTITY" in data or b"\0" in data or has_secret(data):
+            if b"<!DOCTYPE" in data or b"<!ENTITY" in data or b"\0" in data:
                 raise CollectionError("docx_unsafe_package", "안전하지 않은 DOCX 변환 내용입니다.")
             tree = ElementTree.fromstring(data.decode("utf-8-sig"))
             fields = "".join(

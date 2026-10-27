@@ -35,11 +35,12 @@ def test_text_formats_bom_and_safety(extension):
     body, reason, limitations = material_text(f"file.{extension}", b"\xef\xbb\xbfexample")
     assert (body, reason, limitations) == (b"example", None, ())
     assert (
-        material_text(f"file.{extension}", b"api_key=syntheticsecretvalue")[1] == "suspected_secret"
+        material_text(f"file.{extension}", b"api_key=syntheticsecretvalue")[0]
+        == b"api_key=syntheticsecretvalue"
     )
     assert material_text(f"file.{extension}", b"a\0b")[1] == "invalid_format"
     assert material_text(f"file.{extension}", b"x" * (MAX_BODY + 1))[1] == "large"
-    assert material_text("credentials.txt", b"example")[1] == "sensitive_path"
+    assert material_text("credentials.txt", b"example")[0] == b"example"
 
 
 @pytest.mark.parametrize("extension", ["pdf", "png", "jpg", "jpeg"])
@@ -56,8 +57,8 @@ def test_docx_text_and_unprocessed_components():
     assert body == "확인된 변경".encode() and reason is None
     assert "docx_images_or_attachments_unprocessed" in limitations
     assert "docx_text_only_layout_not_preserved" in limitations
-    assert material_text("evidence.docx", docx(word("api_key=syntheticsecretvalue")))[1] == (
-        "suspected_secret"
+    assert material_text("evidence.docx", docx(word("api_key=syntheticsecretvalue")))[0] == (
+        b"api_key=syntheticsecretvalue"
     )
     assert material_text("evidence.docx", docx("<document/>"))[1] == "no_extractable_text"
     revised = word("text").replace("<w:r>", "<w:ins><w:r>").replace("</w:r>", "</w:r></w:ins>")
@@ -113,7 +114,7 @@ def test_completed_collections_project_isolation_freeze_and_provenance(db, git, 
     assert any(e.reason == "historical_source_not_preserved" for e in snapshot.entries)
     user = {e.reference: e for e in snapshot.entries if e.reference.startswith("material/")}
     assert user[f"material/{original['id']}"].text == "This is a user supplied note."
-    assert user[f"material/{secret['id']}"].reason == "suspected_secret"
+    assert user[f"material/{secret['id']}"].text == "api_key=syntheticsecretvalue"
     assert user[f"material/{pdf['id']}"].reason == "format_processing_pending"
     assert all(json.loads(e.source_json)["collection_id"] is None for e in user.values())
     before = snapshot.digest

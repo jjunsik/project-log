@@ -22,7 +22,7 @@ from project_log.experiences import (
     split_evidence,
 )
 from project_log.git import CollectionError
-from project_log.policy import MAX_BODY, SECRET, has_secret, sha256
+from project_log.policy import MAX_BODY, sha256
 
 
 class PageModel(OfflineModel):
@@ -180,25 +180,6 @@ def test_original_docx_copy_cannot_be_used_as_model_input():
         adapter.complete("discover", "synthetic", (chunk,), "{}", Discovery)
     assert caught.value.code == "analysis_media_unavailable"
     assert ModelConnection.calls == []
-
-
-def test_large_input_secret_search_preserves_legacy_detection_rules():
-    values = [
-        b"api_key=syntheticsecretvalue",
-        b"password ' : \"syntheticvalue",
-        b"BEARER " + b"x" * 20,
-        b"https://user:password@host",
-        b"plain",
-        b"x" * 4096,
-        b"secret" + b" " * 4096,
-    ]
-    for lead in range(256):
-        for scheme in (b"https", b"0x", b"0", b"x_", b"x+.9", b"", b"...A9"):
-            values.append(bytes([lead]) + scheme + b"://user:pass@host")
-    for raw in values:
-        assert has_secret(raw) == bool(SECRET.search(raw))
-    assert not has_secret(b"x" * (20 * MAX_BODY))
-    assert has_secret(b"x" * (20 * MAX_BODY) + b"://user:pass@host")
 
 
 def test_docx_derivative_mapping_and_failure_are_not_confused_with_real_rendering(monkeypatch):
