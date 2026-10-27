@@ -8,9 +8,11 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "dev:experiences": "PROJECT_LOG_UI_PREVIEW=1 vite --host 127.0.0.1 --port 4179 --strictPort",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:experiences": "playwright test --config playwright.ui.config.ts"
   },
   "dependencies": {
     "react": "^19.0.0",

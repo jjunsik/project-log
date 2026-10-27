@@ -1,3 +1,4 @@
+import CollectionNotice from './CollectionNotice';
 import {useEffect, useState} from 'react';
 import {api, statusLabels, type Project, type ProjectStatus, type Settings} from './model';
 import type {Collection} from './model';
@@ -20,6 +21,7 @@ export default function ProjectForm({project, confirm, notify, dirty, saved, cre
   useEffect(() => {dirty(changed); return () => dirty(false);}, [changed, dirty]);
   useEffect(() => {const prevent = (e: BeforeUnloadEvent) => {if (changed) e.preventDefault();}; window.addEventListener('beforeunload', prevent); return () => window.removeEventListener('beforeunload', prevent);}, [changed]);
   async function requestSave() {
+    if(project?.analysis_active){setError('AI 분석이 끝난 뒤 설정을 변경하세요.');return;}
     setBusy(true); setError('');
     try {
       const review = project && form.path !== project.path ? await api<Review>(`projects/${project.id}/path-review`, 'POST', form) : null;
@@ -34,11 +36,11 @@ export default function ProjectForm({project, confirm, notify, dirty, saved, cre
       }, !project);
     } catch(e) {setError(message(e));} finally {setBusy(false);}
   }
-  return <section className="card project-form"><h2>{project ? '프로젝트 설정' : '프로젝트 추가'}</h2><form onSubmit={e => {e.preventDefault(); void requestSave();}}>
+  return <section className="card project-form"><h2>{project ? '프로젝트 설정' : '프로젝트 추가'}</h2>{project?.analysis_active && <p className="notice">AI 분석이 끝난 뒤 설정을 변경하세요. 취소 요청 중에도 제한이 유지됩니다.</p>}<form onSubmit={e => {e.preventDefault(); void requestSave();}}>
     <label>프로젝트 이름<input required maxLength={200} value={form.name} onChange={e => setForm({...form,name:e.target.value})}/></label>
     <div className="field" role="group" aria-label="프로젝트 경로"><span>프로젝트 경로</span><div className="path-input"><Text text={form.path || 'Git Repository root를 선택하세요.'}/><button type="button" disabled={busy} onClick={() => void browse()}>찾아보기</button>{form.path && <button type="button" onClick={() => void navigator.clipboard.writeText(form.path).then(() => notify('경로를 복사했습니다.')).catch(() => setError('경로를 복사하지 못했습니다.'))}>경로 복사</button>}</div></div>
     <label>프로젝트 상태<select aria-label="프로젝트 상태" value={form.status} onChange={e => setForm({...form,status:e.target.value as ProjectStatus})}>{Object.entries(statusLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     <label>기본 브랜치<input required value={form.base_branch} onChange={e => setForm({...form,base_branch:e.target.value})}/></label>
-    <p className="hint">프로젝트 상태는 사용자가 선언한 개발 상태입니다.</p>{error && <p className="alert" role="alert">{error}</p>}<footer><button className="primary" disabled={busy || !form.path || (project && !changed)}>{busy ? '처리 중…' : project ? '변경사항 저장' : '등록 후 첫 수집'}</button></footer>
+    <p className="hint">프로젝트 상태는 사용자가 선언한 개발 상태입니다.</p>{!project && <CollectionNotice/>}{error && <p className="alert" role="alert">{error}</p>}<footer><button className="primary" disabled={busy || project?.analysis_active || !form.path || (project && !changed)}>{busy ? '처리 중…' : project ? '변경사항 저장' : '등록 후 첫 수집'}</button></footer>
   </form></section>;
 }

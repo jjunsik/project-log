@@ -30,6 +30,7 @@ export function collectionCaption(c: Collection): string {
   return `${c.number ? `#${c.number}` : '진행 중'} · ${c.title || '제목 없음'} · ${new Date(c.snapshot.started_at ?? c.created_at).toLocaleString('ko-KR')} · ${c.snapshot.branch ?? '브랜치 미확보'}`;
 }
 export interface Project extends Omit<Settings, 'base_branch'> {
+  analysis_active?:boolean;
   base_branch: string | null;
   id: string; path: string; collection_id: string | null; collection_state: CollectionState | null; collection_busy?: boolean;
   created_at: string; updated_at: string;
@@ -48,14 +49,14 @@ export function suggestedName(path: string): string {
   return path.trim().replace(/\/+$/, '').split('/').at(-1) ?? '';
 }
 export class ApiError extends Error {
-  constructor(message: string, public status: number) {super(message);}
+  constructor(message: string, public status: number, public code?:string) {super(message);}
 }
 export async function api<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal, headers: Record<string,string> = {}): Promise<T> {
   const response = await fetch(`/api/${path}`, {method, signal,
     headers: method === 'GET' ? headers : {'Content-Type': 'application/json',...headers},
     body: method === 'GET' ? undefined : JSON.stringify(body ?? {})});
   const data = await response.json();
-  if (!response.ok) throw new ApiError(typeof data.detail === 'string' ? data.detail : '입력 내용을 확인하세요.', response.status);
+  if (!response.ok) throw new ApiError(typeof data.detail === 'string' ? data.detail : '입력 내용을 확인하세요.', response.status, data.code);
   return data as T;
 }
 

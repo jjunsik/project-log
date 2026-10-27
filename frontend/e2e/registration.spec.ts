@@ -3,17 +3,18 @@ import {execFileSync, spawn} from 'node:child_process';
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, unlinkSync, utimesSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 
-const test = base.extend<{backend: string; legacy: boolean; slow: boolean; experience: boolean}>({
+const test = base.extend<{backend: string; legacy: boolean; slow: boolean; experience: boolean; analysis: boolean}>({
   legacy: [false, {option: true}],
   slow: [false, {option: true}],
   experience: [false, {option: true}],
-  backend: [async ({legacy, slow, experience}, use, testInfo) => {
+  analysis: [false, {option: true}],
+  backend: [async ({legacy, slow, experience, analysis}, use, testInfo) => {
     const data = mkdtempSync('/private/tmp/pl-browser-');
     const root = resolve(import.meta.dirname, '../..');
     const origin = new URL(testInfo.project.use.baseURL!);
-    const child = spawn(join(root, '.venv/bin/python'), ['scripts/browser_server.py', data, '--port', origin.port, ...(legacy ? ['--legacy'] : []), ...(slow ? ['--slow'] : []), ...(experience ? ['--experience-fixture'] : [])], {
+    const child = spawn(join(root, '.venv/bin/python'), ['scripts/browser_server.py', data, '--port', origin.port, ...(legacy ? ['--legacy'] : []), ...(slow ? ['--slow'] : []), ...(experience ? ['--experience-fixture'] : []), ...(analysis ? ['--analysis-fixture'] : [])], {
       cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
-      env: {...process.env, GEMINI_API_KEY: '', OPENAI_API_KEY: ''},
+      env: {...process.env, GEMINI_API_KEY: '', OPENAI_API_KEY: '', PROJECT_LOG_AI_ENABLED:'0', PROJECT_LOG_GEMINI_KEY_FILE:''},
     });
     const closed = new Promise<void>(done => child.once('close', () => done()));
     let output = '';
@@ -759,4 +760,83 @@ test('Overview deletion rebases saved evidence across selections, reload, full h
   // Another tab's delete changes history, not the selected UUID. Polling must invalidate the overview.
   expect((await request.delete(`/api/collections/${a}`)).ok()).toBe(true);await stats(['6','60','8'],['-','-','-']);expect((await (await request.get(`/api/collections/${c}`)).json()).snapshot).toEqual(snapshot);
   await collect(page);await stats(['6','60','8'],['0','0','0']);
+});
+
+
+test.describe('Analysis connected flow',()=>{
+  test.use({analysis:true});
+  const open=async(page:import('@playwright/test').Page,name:string)=>{
+    await page.goto('/');await page.getByRole('button',{name:`${name} 대시보드로 이동`,exact:true}).click();
+    await page.locator('.sidebar').getByRole('button',{name:'개발 경험',exact:true}).click();
+  };
+  const confirmAnalysis=async(page:import('@playwright/test').Page)=>{
+    await page.getByRole('button',{name:'전송 안내 확인',exact:true}).click();
+    const modal=page.getByRole('dialog',{name:'외부 AI 전송 안내',exact:true});
+    await expect(modal).toContainText('외부 AI 전송은 없습니다');
+    await modal.getByRole('checkbox').check();await modal.getByRole('button',{name:'동의하고 분석 요청',exact:true}).click();
+  };
+  test('scope consent -> lost response -> reload -> Worker result and evidence, then failed/empty runs preserve history',async({page,request,backend},info)=>{
+    test.setTimeout(65000);
+    const p=await historyProject(request,backend,'API 연결','repo',2),older=p.collections[1];
+    const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+    let statusFailed=false;await page.route(`**/api/projects/${p.id}/analysis`,async route=>{if(!statusFailed){statusFailed=true;await route.abort('failed');}else await route.continue();});
+    await open(page,p.name);await page.getByRole('combobox',{name:'분석 종료 Collection'}).selectOption(older.id);
+    await page.getByRole('button',{name:'분석 시작',exact:true}).click();
+    await expect(page.locator('.analysis-counts')).not.toContainText('확인 전');
+    let posts=0;const requestIds:string[]=[];
+    await page.route(`**/api/projects/${p.id}/analysis/requests`,async route=>{
+      posts++;requestIds.push(route.request().postDataJSON().request_id);if(posts>1)await route.fetch();await route.abort('failed');
+    });
+    await confirmAnalysis(page);
+    await expect(page.getByRole('button',{name:'같은 요청 ID로 다시 확인·전송',exact:true})).toBeVisible();
+    expect(posts).toBe(1);expect((await (await request.get(`/api/projects/${p.id}/analysis`)).json()).executions).toEqual([]);
+    await page.getByRole('button',{name:'같은 요청 ID로 다시 확인·전송',exact:true}).click();
+    await expect.poll(async()=>(await (await request.get(`/api/projects/${p.id}/analysis`)).json()).executions[0]?.state).toBe('completed');
+    await page.reload();await page.getByRole('button',{name:`${p.name} 대시보드로 이동`,exact:true}).click();await page.locator('.sidebar').getByRole('button',{name:'개발 경험',exact:true}).click();await expect(page.locator('.experience-candidate')).toBeVisible();
+    await expect(page.locator('.analysis-history')).toContainText('완료');
+    expect(posts).toBe(2);expect(new Set(requestIds).size).toBe(1);
+    const status=await (await request.get(`/api/projects/${p.id}/analysis`)).json(),run=status.executions[0].result_run_id;
+    expect(status.executions[0].scope.collection_ids).toEqual([older.id]);
+    await page.locator('.experience-citation button').first().click();
+    await expect(page.locator('.experience-evidence .experience-body').first()).not.toBeEmpty();
+    await page.screenshot({path:info.outputPath('analysis-connected-success.png'),fullPage:true});
+    await page.unroute(`**/api/projects/${p.id}/analysis/requests`);
+    writeFileSync(join(backend,'analysis-control/mode'),'network');
+    await page.getByRole('button',{name:'분석 시작',exact:true}).click();await expect(page.locator('.analysis-counts')).not.toContainText('확인 전');await confirmAnalysis(page);
+    await expect(page.locator('.analysis-history')).toContainText('실패');
+    await expect(page.getByRole('combobox',{name:'저장된 분석 결과'})).toHaveValue(run);
+    writeFileSync(join(backend,'analysis-control/mode'),'empty');
+    await page.getByRole('button',{name:'분석 시작',exact:true}).click();await expect(page.locator('.analysis-counts')).not.toContainText('확인 전');await confirmAnalysis(page);
+    await expect(page.locator('.experiences')).toContainText('발견된 개발 경험 후보가 없습니다.');
+    await expect(page.getByRole('combobox',{name:'저장된 분석 결과'}).getByRole('option')).toHaveCount(2);
+    await page.getByRole('combobox',{name:'저장된 분석 결과'}).selectOption(run);await expect(page.locator('.experience-candidate')).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+  test('changed inputs require new consent; global limit, mutation guards, new collection and cancellation remain independent',async({page,request,backend})=>{
+    test.setTimeout(65000);
+    const p=await historyProject(request,backend,'자료 보호','repo',1),other=await historyProject(request,backend,'다른 분석','empty-repo',1);
+    expect((await request.put(`/api/projects/${other.id}/materials`,{data:Buffer.from('Other synthetic context'),headers:{'content-type':'application/octet-stream','x-file-name':'other.md'}})).status()).toBe(201);
+    await open(page,p.name);await page.getByRole('button',{name:'분석 시작',exact:true}).click();
+    await page.getByRole('button',{name:'전송 안내 확인',exact:true}).click();
+    const modal=page.getByRole('dialog',{name:'외부 AI 전송 안내',exact:true});await modal.getByRole('checkbox').check();
+    const upload=await request.put(`/api/projects/${p.id}/materials`,{data:Buffer.from('Added after preparation'),headers:{'content-type':'application/octet-stream','x-file-name':'new.md'}});expect(upload.status()).toBe(201);
+    await expect(modal.getByRole('checkbox')).toBeDisabled();await expect(modal.getByRole('checkbox')).not.toBeChecked();
+    await modal.locator('footer').getByRole('button',{name:'닫기',exact:true}).click();
+    await page.getByRole('button',{name:'목록 새로고침',exact:true}).click();
+    writeFileSync(join(backend,'analysis-control/mode'),'blocked');
+    await page.getByRole('button',{name:'분석 시작',exact:true}).click();await expect(page.locator('.analysis-counts')).not.toContainText('확인 전');await confirmAnalysis(page);
+    await expect(page.getByRole('button',{name:'분석 취소 요청',exact:true})).toBeEnabled();
+    await expect.poll(()=>existsSync(join(backend,'analysis-control/attempt-1'))).toBe(true);
+    await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click();await page.locator('.user-materials').getByRole('button',{name:'전체 보기 →',exact:true}).click();
+    await expect(page.getByRole('button',{name:'파일 선택',exact:true})).toBeDisabled();
+    const denied=await request.patch(`/api/collections/${p.collections[0].id}`,{data:{title:'blocked',description:null}});expect(denied.status()).toBe(409);expect((await denied.json()).code).toBe('analysis_active');
+    const later=await request.post(`/api/projects/${p.id}/collections`,{data:{}});expect(later.ok()).toBe(true);await completed(request,p.id);
+    const prep=await request.post(`/api/projects/${other.id}/analysis/preparations`,{data:{preparation_id:crypto.randomUUID(),end_collection_id:other.collections[0].id}});expect(prep.ok()).toBe(true);const d=await prep.json();
+    const refused=await request.post(`/api/projects/${other.id}/analysis/requests`,{data:{request_id:crypto.randomUUID(),preparation_id:d.id,input_digest:d.input_digest,consent_digest:d.consent_digest,confirmed:true}});expect((await refused.json()).error_code).toBe('analysis_capacity_full');
+    expect((await (await request.get(`/api/projects/${other.id}`)).json()).analysis_active).toBe(false);
+    await page.locator('.sidebar').getByRole('button',{name:'개발 경험',exact:true}).click();await page.getByRole('button',{name:'분석 취소 요청',exact:true}).click();
+    await expect(page.locator('.analysis-history')).toContainText('취소 완료');
+    await page.locator('.sidebar').getByRole('button',{name:'대시보드',exact:true}).click();await page.locator('.user-materials').getByRole('button',{name:'전체 보기 →',exact:true}).click();await expect(page.getByRole('button',{name:'파일 선택',exact:true})).toBeEnabled();
+    expect((await (await request.get(`/api/projects/${p.id}/experiences`)).json()).runs).toEqual([]);
+  });
 });

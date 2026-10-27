@@ -25,7 +25,7 @@ export async function uploadBatch(items: UploadItem[], upload: (file: File) => P
   return null;
 }
 
-export default function Materials({projectId, compact = false, onAll, confirm, notify}: {projectId: string; compact?: boolean; onAll?: () => void; confirm: Confirm; notify: (text:string)=>void}) {
+export default function Materials({projectId, restriction, compact = false, onAll, confirm, notify}: {projectId: string; restriction?:string; compact?: boolean; onAll?: () => void; confirm: Confirm; notify: (text:string)=>void}) {
   const [page, setPage] = useHistoryPage(`${projectId}/materials/${compact?'recent':'all'}`);
   const [materials, setMaterials] = useState<Material[]>([]);
   const [policy, setPolicy] = useState<Policy | null>(null);
@@ -54,7 +54,7 @@ export default function Materials({projectId, compact = false, onAll, confirm, n
   }, [projectId]);
 
   async function add(items: UploadItem[]) {
-    if (working.current || !policy || !items.length) return;
+    if (restriction || working.current || !policy || !items.length) return;
     working.current = true; setBusy(true); setError(''); setFailure(null);
     const signal = controller.current.signal;
     try {
@@ -75,7 +75,7 @@ export default function Materials({projectId, compact = false, onAll, confirm, n
   }
 
   async function remove(material: Material) {
-    if (working.current) return;
+    if (restriction || working.current) return;
     working.current = true; setBusy(true); setError('');
     const signal = controller.current.signal;
     try {
@@ -99,7 +99,7 @@ export default function Materials({projectId, compact = false, onAll, confirm, n
         }) : Array.from(e.dataTransfer.files).map(file => ({name: file.name, file}));
         void add(items);
       }}>
-      <button disabled={busy || !policy} onClick={() => input.current?.click()}>파일 선택</button>
+      <button disabled={busy || !!restriction || !policy} onClick={() => input.current?.click()}>파일 선택</button>
       <input ref={input} type="file" multiple hidden aria-label="추가할 파일" accept={policy?.extensions.join(',')}
         onChange={e => {void add(Array.from(e.target.files ?? []).map(file => ({name: file.name, file}))); e.target.value = '';}}/>
       <p>{busy ? '처리 중…' : '이 영역에 파일을 드래그 앤 드롭하여 추가할 수 있습니다.'}</p>
@@ -108,12 +108,13 @@ export default function Materials({projectId, compact = false, onAll, confirm, n
     </div></>;
   return <section className="card user-materials" aria-label="사용자 추가 자료">
     <header><h2><Icon name="clip"/> 사용자 추가 자료</h2><div className="actions">{compact ? <button onClick={onAll}>전체 보기 →</button> : <PageCount page={page} total={materials.length}/>}</div></header>
+    {restriction && <p className="notice">{restriction}</p>}
     {!compact && drop}
     {error && <p className="alert" role="alert">{error}</p>}
     {failure && <div className="alert upload-failure" role="alert"><strong>{failure.filename}</strong>: {failure.reason}
       <p>업로드되지 않음</p><ul>{failure.notUploaded.map((name, i) => <li key={i}>{name}</li>)}</ul></div>}
     {loading ? <p className="hint">자료를 불러오는 중입니다.</p> : !materials.length && <p className="hint">추가한 자료가 없습니다.</p>}
-    <div className="table-scroll"><table><thead><tr><th>파일명</th><th>등록일</th><th>크기</th><th>작업</th></tr></thead><tbody>{(compact ? materials.slice(0,3) : materials.slice((page-1)*10,page*10)).map(material => <tr key={material.id}><td><Text text={material.filename}/></td><td>{new Date(material.added_at).toLocaleDateString('ko-KR')}</td><td>{size(material.size_bytes)}</td><td className="actions"><a className="button" href={`/api/${path}/${material.id}/file`} download={material.filename}><Icon name="download"/> 다운로드</a><button className="danger" disabled={busy} aria-label={`${material.filename} 삭제`} onClick={() => confirm('사용자 추가 자료 삭제', `“${material.filename}”의 보관 사본과 정보를 영구 삭제합니다. 복구할 수 없으며 PC의 원본 파일은 유지됩니다.`, () => remove(material))}>삭제</button></td></tr>)}</tbody></table></div>
+    <div className="table-scroll"><table><thead><tr><th>파일명</th><th>등록일</th><th>크기</th><th>작업</th></tr></thead><tbody>{(compact ? materials.slice(0,3) : materials.slice((page-1)*10,page*10)).map(material => <tr key={material.id}><td><Text text={material.filename}/></td><td>{new Date(material.added_at).toLocaleDateString('ko-KR')}</td><td>{size(material.size_bytes)}</td><td className="actions"><a className="button" href={`/api/${path}/${material.id}/file`} download={material.filename}><Icon name="download"/> 다운로드</a><button className="danger" disabled={busy || !!restriction} aria-label={`${material.filename} 삭제`} onClick={() => confirm('사용자 추가 자료 삭제', `“${material.filename}”의 보관 사본과 정보를 영구 삭제합니다. 복구할 수 없으며 PC의 원본 파일은 유지됩니다.`, () => remove(material))}>삭제</button></td></tr>)}</tbody></table></div>
     {compact ? drop : <Pagination page={page} total={materials.length} change={setPage}/>}
   </section>;
 }

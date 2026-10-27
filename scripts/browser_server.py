@@ -65,6 +65,7 @@ if __name__ == "__main__":
     parser.add_argument("--legacy", action="store_true")
     parser.add_argument("--slow", action="store_true")
     parser.add_argument("--experience-fixture", action="store_true")
+    parser.add_argument("--analysis-fixture", action="store_true")
     args = parser.parse_args()
     if args.slow:
         from project_log import worker as worker_module
@@ -113,6 +114,7 @@ if __name__ == "__main__":
             from project_log.api import create_app
 
             experience_model = None
+            analysis_options = {}
             if args.experience_fixture:
                 # Reuse the synthetic protocol fixture; never provide this injection in serve.
                 import sys
@@ -122,8 +124,32 @@ if __name__ == "__main__":
 
                 experience_model = OfflineModel()
 
+            if args.analysis_fixture:
+                import sys
+
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+                from analysis_worker_fixtures import offline_factory
+
+                from project_log.analysis_execution import execution_profile
+
+                control = args.root / "analysis-control"
+                control.mkdir()
+                mode = control / "mode"
+                mode.write_text("success")
+                analysis_options = {
+                    "analysis_profile": {
+                        **execution_profile("synthetic-offline"),
+                        "test_directory": str(control),
+                        "test_control_file": str(mode),
+                    },
+                    "analysis_model_factory": offline_factory,
+                }
             uvicorn.run(
-                create_app(folder_home=args.root.resolve(), experience_test_model=experience_model),
+                create_app(
+                    folder_home=args.root.resolve(),
+                    experience_test_model=experience_model,
+                    **analysis_options,
+                ),
                 host="127.0.0.1",
                 port=args.port,
             )
