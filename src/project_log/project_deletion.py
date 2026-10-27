@@ -92,6 +92,8 @@ class ProjectDeletion:
         self._sync(self.root)
 
     def recover(self) -> None:
+        from project_log.analysis_protection import require_mutable
+
         # No storage writes occur on ordinary startup. Only interrupted deletion records
         # are reconciled, before the worker/API starts serving requests.
         if not self.root.exists() and not self.root.is_symlink():
@@ -106,6 +108,8 @@ class ProjectDeletion:
                 exists = conn.execute(
                     "SELECT id FROM projects WHERE id=%s FOR UPDATE", (project,)
                 ).fetchone()
+                if exists:
+                    require_mutable(conn, project)
                 if not (stage / "manifest.json").exists():
                     self._directory(stage)
                     if any(p.name != ".manifest.tmp" or p.is_symlink() for p in stage.iterdir()):
@@ -168,6 +172,8 @@ class ProjectDeletion:
                 (project,),
             )
         for table in (
+            "analysis_requests",
+            "analysis_preparations",
             "experience_runs",
             "working_repairs",
             "changes",
@@ -186,6 +192,8 @@ class ProjectDeletion:
             conn.execute(f"DELETE FROM {table} WHERE {column}=%s", (project,))
 
     def delete(self, project: str, name: str) -> None:
+        from project_log.analysis_protection import require_mutable
+
         project = str(UUID(project))
         record = None
         committed = False
@@ -194,6 +202,8 @@ class ProjectDeletion:
             owner = conn.execute(
                 "SELECT * FROM projects WHERE id=%s FOR UPDATE", (project,)
             ).fetchone()
+            if owner:
+                require_mutable(conn, project)
             stage = self.root / project
             if stage.exists() or stage.is_symlink():
                 previous = self._manifest(project)

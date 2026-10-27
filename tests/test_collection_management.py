@@ -7,13 +7,16 @@ from pathlib import Path
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from project_log import worker as worker_module
 from project_log.collections import Collections, Memo
 from project_log.collector import collect
 from project_log.db import CollectionStopped, Database
-from project_log.git import CollectionError
+from project_log.git import CollectionError, diagnose
 from project_log.materials import Materials
+from project_log.policy import POLICY
+from project_log.service import Projects
 from project_log.worker import Worker
 from scripts.verification_db import temporary_database
 from tests.test_collection import commit, register
@@ -375,8 +378,36 @@ def test_005_additive_upgrade_preserves_all_existing_rows_and_completed_lookup(g
                     "INSERT INTO schema_migrations(version,sha256) VALUES (%s,%s)",
                     (file.name, hashlib.sha256(raw).hexdigest()),
                 )
-        projects, pid, cid = completed(db, git, tmp_path)
-        Materials(db).add(pid, "old.txt", b"old material")
+        # Seed 005 without current Project lookup/mutation paths, which require 009.
+        # Keep real capture/collection and all before/after preservation assertions.
+        root = tmp_path / "repo"
+        commit(git, root, "a.txt", "shared\n", "first")
+        repository, info = diagnose(str(root))
+        info.update(repository.collection_branch("main"))
+        pid, cid = str(uuid.uuid4()), str(uuid.uuid4())
+        projects = Projects(db)
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO projects(id,name,path,repository_key,status,base_branch,"
+                "coding_agent,repository_info) VALUES (%s,'Test',%s,%s,'ongoing','main',"
+                "'none',%s)",
+                (pid, info["path"], info["repository_key"], Jsonb(info)),
+            )
+            conn.execute(
+                "INSERT INTO collections(id,project_id,state,policy) VALUES (%s,%s,'capturing',%s)",
+                (cid, pid, Jsonb(POLICY)),
+            )
+        projects._capture(cid, repository, info, "main")
+        collect(db, cid, lambda: False)
+        mid, raw = str(uuid.uuid4()), b"old material"
+        store = Materials(db)
+        store._target(pid, mid, create=True).write_bytes(raw)
+        db.execute(
+            "INSERT INTO user_materials"
+            "(id,project_id,filename,filename_key,size_bytes,extension,media_type,sha256) "
+            "VALUES (%s,%s,'old.txt','old.txt',%s,'.txt','text/plain',%s)",
+            (mid, pid, len(raw), hashlib.sha256(raw).hexdigest()),
+        )
         before = snapshot(db)
         ledger = db.all("SELECT * FROM schema_migrations ORDER BY version")
         db.migrate()

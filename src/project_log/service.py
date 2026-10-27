@@ -146,9 +146,17 @@ class Projects:
                 "SELECT 1 FROM collections WHERE project_id=%s AND state<>'completed'", (project,)
             )
         )
+        row["analysis_active"] = bool(
+            self.db.all(
+                "SELECT 1 FROM analysis_requests WHERE project_id=%s "
+                "AND state IN ('queued','running','cancel_requested')",
+                (project,),
+            )
+        )
         return row
 
     def update(self, project: str, settings: Settings) -> Row:
+        from project_log.analysis_protection import require_mutable
         from project_log.materials import Materials
         from project_log.reconnection import review
 
@@ -158,6 +166,7 @@ class Projects:
             ).fetchone()
             if row is None:
                 raise CollectionError("not_found", "프로젝트가 없습니다.")
+            require_mutable(conn, project)
             if (
                 settings.expected_updated_at is not None
                 and row["updated_at"] != settings.expected_updated_at

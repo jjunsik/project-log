@@ -160,6 +160,8 @@ class Materials:
         return staged
 
     def add(self, project: str, filename: str, raw: bytes) -> Row:
+        from project_log.analysis_protection import require_mutable
+
         key = filename_key(filename)
         if len(raw) > self.max_bytes:
             raise CollectionError("file_too_large", "파일 크기 제한을 초과했습니다.")
@@ -175,6 +177,7 @@ class Materials:
                     "SELECT id FROM projects WHERE id=%s FOR UPDATE", (project,)
                 ).fetchone():
                     raise CollectionError("not_found", "해당 Project가 없습니다.")
+                require_mutable(conn, project)
                 for repository in conn.execute("SELECT path FROM projects").fetchall():
                     self.check_repository(repository["path"])
                 same_name = conn.execute(
@@ -233,12 +236,15 @@ class Materials:
             return row, raw
 
     def delete(self, project: str, material: str) -> None:
+        from project_log.analysis_protection import require_mutable
+
         target = self.path(project, material)
         raw: bytes | None = None
         removed = False
         try:
             with self.db.connect() as conn:
                 conn.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project,))
+                require_mutable(conn, project)
                 row = conn.execute(
                     "SELECT id FROM user_materials WHERE project_id=%s AND id=%s FOR UPDATE",
                     (project, material),
