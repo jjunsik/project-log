@@ -22,7 +22,11 @@ def saved(db, tmp_path):
     snapshot = replace(
         inputs(
             evidence("one", "counter correction"),
-            Evidence("media", "{}", media=(Media("fixture.png", "image/png", b"synthetic"),)),
+            Evidence(
+                "media",
+                "{}",
+                media=(Media("fixture.png", "image/png", b"synthetic", use_for_analysis=False),),
+            ),
         ),
         project_id=pid,
     )

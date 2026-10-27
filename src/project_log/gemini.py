@@ -1,6 +1,7 @@
 """Backend-only LangChain Gemini adapter; real project transfers remain disabled."""
 
 import json
+import math
 import os
 import ssl
 import stat
@@ -36,6 +37,50 @@ NOTICE = (
     "민감·기밀·개인정보는 전송 불가. 실제 자료 분석 기능은 비활성. "
     "Billing 미연결 Free tier 확인 필요; API Key만으로 Billing 상태를 증명할 수 없음."
 )
+
+
+def strict_json(raw: str | bytes | bytearray) -> Any:
+    """Reject ambiguous duplicate keys and non-JSON numbers before SDK parsing."""
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    def constant(value: str) -> Any:
+        raise ValueError("Non-JSON number")
+
+    def floating(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("Non-finite JSON number")
+        return result
+
+    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant, parse_float=floating)
+
+
+def error_details(response: httpx.Response, maximum: int) -> dict[str, Any]:
+    """Read bounded diagnostics in memory; callers only retain allowlisted aliases.
+
+    Diagnostic failures must preserve the already observed HTTP status. Never
+    parse a truncated prefix, decompress, or expose arbitrary provider fields.
+    """
+    try:
+        if response.headers.get("content-encoding", "identity").lower() != "identity":
+            return {}
+        raw = bytearray()
+        for part in response.iter_raw():
+            if len(raw) + len(part) > maximum:
+                return {}
+            raw.extend(part)
+        body = strict_json(raw)
+        error = body.get("error") if isinstance(body, dict) else None
+        return error if isinstance(error, dict) else {}
+    except Exception:
+        return {}
 
 
 def read_operator_key(path: Path) -> str:
@@ -152,7 +197,7 @@ class _SyntheticTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
     """One-request guard at the public streaming transport boundary, before SDK buffering.
 
     HTTPX owns HTTP/TLS. Only routing, attempt count and bounded raw body policy live here.
-    This transport is scoped to the synchronous stage-1 verification, not the future pipeline.
+    Shared by synchronous synthetic verification and the admitted analysis adapter.
     """
 
     def __init__(self, model: str, *, inner: httpx.BaseTransport | None = None):
@@ -164,15 +209,25 @@ class _SyntheticTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
         self.endpoint = f"https://{HOST}/v1beta/models/{model}:generateContent"
         self.attempted = False
         self.usage_json = "{}"
+        # Observed local boundaries only; transport entry is not proof of delivery.
+        self.stage = "setup"
+        self.status_code: int | None = None
+        self.closed = False
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         if self.attempted or request.method != "POST" or str(request.url) != self.endpoint:
             raise CollectionError("provider_request_blocked", "허용된 단일 합성 요청만 가능합니다.")
         self.attempted = True
         request.headers["accept-encoding"] = "identity"
+        self.before_send(request)
+        self.stage = "transport"
         response = self.inner.handle_request(request)
+        self.status_code = response.status_code
+        self.stage = "headers"
+        failed = True
         try:
             if response.status_code != 200:
+                self.response_error(response)
                 code = {
                     400: "provider_invalid_request",
                     401: "provider_authentication",
@@ -190,26 +245,50 @@ class _SyntheticTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
                     "provider_response_too_large", "Gemini 응답 크기 제한 초과입니다."
                 )
             body = bytearray()
+            self.stage = "body_wait"
             for chunk in response.iter_raw():
                 if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
                     raise CollectionError(
                         "provider_response_too_large", "Gemini 응답 크기 제한 초과입니다."
                     )
                 body.extend(chunk)
+                if chunk:
+                    self.stage = "body_partial"
+            self.stage = "body_complete"
             raw = bytes(body)
+            self.stage = "envelope"
             raw, self.usage_json = _envelope_policy(raw)
             headers = response.headers.copy()
             headers["content-length"] = str(len(raw))
-            return httpx.Response(response.status_code, headers=headers, content=raw)
+            buffered = httpx.Response(response.status_code, headers=headers, content=raw)
+            failed = False
+            return buffered
         finally:
             # Oversize/error closes immediately, without draining the remaining body.
-            response.close()
+            if not failed:
+                self.stage = "response_close"
+            try:
+                response.close()
+            except Exception:
+                if not failed:
+                    raise
+
+    def before_send(self, request: httpx.Request) -> None:
+        pass
+
+    def response_error(self, response: httpx.Response) -> None:
+        pass
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         raise CollectionError("provider_request_blocked", "합성 검증은 동기 호출만 허용합니다.")
 
     def close(self) -> None:
-        self.inner.close()
+        # The SDK client and the adapter both release this transport. Close once,
+        # including when the first close fails; cleanup is never a new request.
+        if not self.closed:
+            self.closed = True
+            self.stage = "transport_close"
+            self.inner.close()
 
     async def aclose(self) -> None:
         self.close()
@@ -241,6 +320,7 @@ class GeminiClient:
             raise CollectionError("ai_not_configured", "Developer API 설정만 허용합니다.")
         transport = _SyntheticTransport(self.config.model)
         model: ChatGoogleGenerativeAI | None = None
+        failed = True
         try:
             # Ambient tracing is not authorization to send prompts/results to LangSmith.
             with tracing_context(enabled=False):
@@ -277,9 +357,11 @@ class GeminiClient:
                 )
             if not isinstance(result, SyntheticObservation):
                 raise ValueError("Unexpected structured output")
-            return GeminiResult(
+            verified = GeminiResult(
                 result.observation, tuple(result.evidence_ids), transport.usage_json
             )
+            failed = False
+            return verified
         except CollectionError:
             raise
         except ssl.SSLCertVerificationError:
@@ -303,9 +385,20 @@ class GeminiClient:
                 "provider_invalid_response", "Gemini 응답 형식·근거 참조 검증 실패입니다."
             ) from None
         finally:
-            if model is not None and model.client is not None:
-                model.client.close()
-            transport.close()
+            cleanup_failed = False
+            try:
+                if model is not None and model.client is not None:
+                    model.client.close()
+            except Exception:
+                cleanup_failed = True
+            try:
+                transport.close()
+            except Exception:
+                cleanup_failed = True
+            if not failed and cleanup_failed:
+                raise CollectionError(
+                    "provider_cleanup_error", "Gemini 자원 정리에 실패했습니다."
+                ) from None
 
 
 def _envelope_policy(raw: bytes) -> tuple[bytes, str]:
@@ -316,7 +409,7 @@ def _envelope_policy(raw: bytes) -> tuple[bytes, str]:
     and is discarded before SDK decoding, as in the original synthetic result contract.
     """
     try:
-        response: dict[str, Any] = json.loads(raw)
+        response: dict[str, Any] = strict_json(raw)
         if response.get("promptFeedback", {}).get("blockReason"):
             raise CollectionError("provider_blocked", "Gemini가 입력을 차단했습니다.")
         candidates = response["candidates"]
@@ -336,7 +429,7 @@ def _envelope_policy(raw: bytes) -> tuple[bytes, str]:
         ):
             raise ValueError("Unexpected response part")
         # LangChain's JSON parser can repair partial/fenced JSON; stage 1 requires complete JSON.
-        json.loads("".join(p["text"] for p in parts if not p.get("thought")))
+        strict_json("".join(p["text"] for p in parts if not p.get("thought")))
         usage = response.get("usageMetadata", {})
         counts = {
             k: usage[k]
@@ -351,7 +444,7 @@ def _envelope_policy(raw: bytes) -> tuple[bytes, str]:
             ]
             raw = canonical(response).encode()
         return raw, canonical(counts)
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
         raise CollectionError(
             "provider_invalid_response", "Gemini 응답 형식·근거 참조 검증 실패입니다."
         ) from None

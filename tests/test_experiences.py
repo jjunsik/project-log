@@ -11,14 +11,14 @@ from project_log.experiences import (
     Audit,
     Citation,
     Claim,
-    Consolidation,
+    ConsolidationAssignments,
     Discovery,
     ExperienceGraph,
     Finding,
-    Group,
     Limits,
     Reconstruction,
     Seed,
+    discovery_schema,
     split_evidence,
 )
 from project_log.git import CollectionError
@@ -70,7 +70,28 @@ class OfflineModel:
             ]
             return Discovery(seeds=seeds)
         if task == "consolidate":
-            return Consolidation(groups=[Group(seed_ids=list(range(len(json.loads(context)))))])
+            return schema.model_validate(
+                {"assignments": {seed["seed_id"]: 0 for seed in json.loads(context)}}
+            )
+        if task == "reconcile":
+            data = json.loads(context)
+            ids = [s["seed_id"] for s in data["seeds"]]
+            supports = sorted({ref for s in data["seeds"] for ref in s["support_ids"]})
+            return schema.model_validate(
+                {
+                    "assignments": dict.fromkeys(ids, 0),
+                    "grounds": [
+                        {
+                            "label": 0,
+                            "reason": "Synthetic same-event relation",
+                            "support_ids": supports,
+                        }
+                    ]
+                    if len(ids) > 1
+                    else [],
+                    "splits": [],
+                }
+            )
         if task == "reconstruct":
             claims = []
             for chunk in chunks:
@@ -137,6 +158,7 @@ def test_real_langgraph_discovery_retrieval_multiple_times_and_unknowns():
     assert {task for task, _, _ in model.calls} == {
         "discover",
         "consolidate",
+        "reconcile",
         "reconstruct",
         "audit",
         "assess",
@@ -160,11 +182,11 @@ def test_native_media_separate_batches_and_unverified_interpretation():
         Evidence("image", "{}", media=(Media("result.png", "image/png", b"synthetic-image"),)),
     )
     model = OfflineModel()
+    chunks = split_evidence(snapshot, Limits())
+    assert {ref for chunk in chunks for ref in chunk.references} == {"image", "pdf"}
     result = ExperienceGraph(model).run(snapshot)
-    assert result.coverage["discovered_references"] == ["image", "pdf"]
-    assert all(len(chunks) == 1 for task, chunks, _ in model.calls if task == "discover")
-    assert all(c.status != "EVIDENCED" for c in result.candidates[0].claims)
-    assert result.candidates[0].category == "potential"
+    assert result.coverage["discovery_chunks"] == 2
+    assert len(model.calls) > 0
 
 
 @pytest.mark.parametrize(
@@ -209,18 +231,49 @@ def test_invalid_claims_are_rejected(change, code):
     assert exc.value.code == code
 
 
-def test_consolidation_cannot_drop_a_candidate():
+@pytest.mark.parametrize(
+    ("assignments", "counts"),
+    [
+        ({"seed_0000": 0}, "m1_x0_v0"),
+        ({"seed_0000": 0, "seed_0001": 0, "seed_0002": 0}, "m0_x1_v0"),
+        ({"seed_0000": 0, "seed_0002": 0}, "m1_x1_v0"),
+        ({"seed_0000": -1, "seed_0001": 1}, "m0_x0_v1"),
+        ({"seed_0000": 0, "seed_0001": 2}, "m0_x0_v1"),
+    ],
+)
+def test_consolidation_cannot_drop_or_misidentify_a_candidate(assignments, counts):
     class DroppingModel(OfflineModel):
         def complete(self, task, instruction, chunks, context, schema):
             if task == "consolidate":
-                return Consolidation(groups=[Group(seed_ids=[0])])
+                return ConsolidationAssignments(assignments=assignments)
             return super().complete(task, instruction, chunks, context, schema)
 
     with pytest.raises(CollectionError) as exc:
         ExperienceGraph(DroppingModel()).run(
             inputs(evidence("one", "before"), evidence("two", "after"))
         )
-    assert exc.value.code == "candidate_coverage_invalid"
+    assert exc.value.code == f"candidate_coverage_invalid_{counts}_n2"
+
+
+@pytest.mark.parametrize("indices", [[0], [0, 0], [0, 2]])
+def test_audit_cannot_omit_duplicate_or_reference_an_unprovided_claim(indices):
+    class InvalidAudit(OfflineModel):
+        def complete(self, task, instruction, chunks, context, schema):
+            result = super().complete(task, instruction, chunks, context, schema)
+            if task == "audit":
+                return Audit(
+                    findings=[
+                        Finding(claim_index=i, supported=True, explanation="Synthetic audit")
+                        for i in indices
+                    ]
+                )
+            return result
+
+    model = InvalidAudit()
+    with pytest.raises(CollectionError) as exc:
+        ExperienceGraph(model).run(inputs(evidence("one", "before"), evidence("two", "after")))
+    assert exc.value.code == "claim_audit_incomplete"
+    assert model.calls[-1][0] == "audit"  # No assessment or partial completion.
 
 
 def test_failed_grounding_remains_unknown_and_does_not_become_confirmed():
@@ -273,3 +326,104 @@ def test_ambient_tracing_is_disabled(monkeypatch):
     monkeypatch.setattr(Client, "create_run", forbidden)
     result = ExperienceGraph(OfflineModel()).run(inputs(evidence("one", "counter")))
     assert result.candidates
+
+
+def test_discovery_schema_is_batch_scoped_without_changing_the_domain_parser():
+    chunks = split_evidence(inputs(evidence("one", "first"), evidence("two", "second")), Limits())
+    original = Discovery.model_json_schema()
+    for batch in (chunks, chunks[:1]):
+        schema = discovery_schema(batch)
+        document = schema.model_json_schema()
+        ids = document["properties"]["seeds"]["items"]["properties"]["evidence_ids"]
+        assert ids["items"] == {"type": "string", "enum": [c.id for c in batch]}
+        assert ids["minItems"] == 1 and "uniqueItems" not in ids
+        assert schema.model_json_schema() == document
+        # Generation constraints must not hide domain violations behind SDK parser errors.
+        parsed = schema.model_validate(
+            {
+                "seeds": [
+                    {
+                        "title": "test",
+                        "rationale": "test",
+                        "evidence_ids": ["outside"],
+                        "search_terms": [],
+                    }
+                ]
+            }
+        )
+        assert isinstance(parsed, Discovery) and parsed.seeds[0].evidence_ids == ["outside"]
+    assert Discovery.model_json_schema() == original
+
+
+@pytest.mark.parametrize("kind", ["out_of_batch", "duplicate", "out_of_batch_duplicate"])
+def test_discovery_rejects_reference_violations_without_normalization_or_followup(kind):
+    class InvalidDiscovery(OfflineModel):
+        def complete(self, task, instruction, chunks, context, schema):
+            result = super().complete(task, instruction, chunks, context, schema)
+            assert task == "discover"
+            refs = {
+                "out_of_batch": ["synthetic-outside-id"],
+                "duplicate": [chunks[0].id, chunks[0].id],
+                "out_of_batch_duplicate": ["synthetic-outside-id", "synthetic-outside-id"],
+            }[kind]
+            result.seeds[0].evidence_ids = refs
+            self.response = result
+            self.original = result.model_dump()
+            return result
+
+    model = InvalidDiscovery()
+    with pytest.raises(CollectionError) as error:
+        ExperienceGraph(model).run(inputs(evidence("one", "synthetic candidate body")))
+    assert error.value.code == f"invalid_discovery_reference_{kind}"
+    assert str(error.value) == "발견 후보의 근거 참조가 유효하지 않습니다."
+    assert model.response.model_dump() == model.original
+    assert len(model.calls) == 1
+
+
+def test_discovery_reports_both_violation_types_even_in_different_candidates():
+    class InvalidDiscovery(OfflineModel):
+        def complete(self, task, instruction, chunks, context, schema):
+            result = super().complete(task, instruction, chunks, context, schema)
+            result.seeds[0].evidence_ids = ["outside"]
+            result.seeds[1].evidence_ids = [chunks[1].id, chunks[1].id]
+            return result
+
+    with pytest.raises(CollectionError) as error:
+        ExperienceGraph(InvalidDiscovery()).run(inputs(evidence("one", "a"), evidence("two", "b")))
+    assert error.value.code == "invalid_discovery_reference_out_of_batch_duplicate"
+
+
+def test_later_discovery_cannot_reference_an_earlier_batch_or_return_partial_success():
+    class EarlierReference(OfflineModel):
+        def complete(self, task, instruction, chunks, context, schema):
+            result = super().complete(task, instruction, chunks, context, schema)
+            assert task == "discover"
+            if len(self.calls) == 1:
+                self.earlier_id = chunks[0].id
+            else:
+                result.seeds[0].evidence_ids = [self.earlier_id]
+            return result
+
+    model = EarlierReference()
+    with pytest.raises(CollectionError) as error:
+        ExperienceGraph(model, Limits(chunk_chars=40, batch_chars=300)).run(
+            inputs(evidence("one", "first counter"), evidence("two", "second counter"))
+        )
+    assert error.value.code == "invalid_discovery_reference_out_of_batch"
+    assert [task for task, _, _ in model.calls] == ["discover", "discover"]
+
+
+def test_different_discovery_candidates_can_share_the_same_reference():
+    class SharedReference(OfflineModel):
+        def complete(self, task, instruction, chunks, context, schema):
+            result = super().complete(task, instruction, chunks, context, schema)
+            if task == "discover":
+                result.seeds.append(
+                    result.seeds[0].model_copy(update={"title": "related candidate"})
+                )
+            if task == "consolidate":
+                assert len(json.loads(context)) == 2
+            return result
+
+    result = ExperienceGraph(SharedReference()).run(inputs(evidence("one", "counter fix")))
+    assert result.candidates[0].evidence_ids == ["one"]

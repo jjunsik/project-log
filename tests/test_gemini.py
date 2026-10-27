@@ -44,8 +44,9 @@ def valid_response(**overrides):
 
 
 class TrackedStream(httpx.SyncByteStream):
-    def __init__(self, chunks):
+    def __init__(self, chunks, *, error=None, close_error=None):
         self.chunks = chunks
+        self.error, self.close_error = error, close_error
         self.yielded = 0
         self.closed = False
 
@@ -53,9 +54,13 @@ class TrackedStream(httpx.SyncByteStream):
         for chunk in self.chunks:
             self.yielded += 1
             yield chunk
+        if self.error:
+            raise self.error
 
     def close(self):
         self.closed = True
+        if self.close_error:
+            raise self.close_error
 
 
 class FakeConnection(httpx.BaseTransport):
@@ -65,10 +70,14 @@ class FakeConnection(httpx.BaseTransport):
     calls = []
     chunks = None
     response_headers = {}
+    stream_error = None
+    stream_close_error = None
+    close_error = None
 
     def __init__(self, **kwargs):
         assert kwargs == {"retries": 0, "verify": True, "trust_env": False}
         self.closed = False
+        self.close_count = 0
         self.requests = []
         self.calls.append(self)
 
@@ -82,11 +91,18 @@ class FakeConnection(httpx.BaseTransport):
         )
         if self.error:
             raise self.error
-        self.stream = TrackedStream(self.chunks if self.chunks is not None else [self.payload])
+        self.stream = TrackedStream(
+            self.chunks if self.chunks is not None else [self.payload],
+            error=self.stream_error,
+            close_error=self.stream_close_error,
+        )
         return httpx.Response(self.status, headers=self.response_headers, stream=self.stream)
 
     def close(self):
         self.closed = True
+        self.close_count += 1
+        if self.close_error:
+            raise self.close_error
 
 
 @pytest.fixture
@@ -201,6 +217,21 @@ def test_network_failure_and_oversized_response(connection, monkeypatch):
     with pytest.raises(CollectionError) as exc:
         client.verify_synthetic(consent)
     assert exc.value.code == "provider_response_too_large"
+
+
+@pytest.mark.parametrize("primary", [False, True])
+def test_common_transport_cleanup_is_once_and_does_not_mask_primary(
+    connection, monkeypatch, primary
+):
+    monkeypatch.setattr(connection, "close_error", OSError("private cleanup"))
+    if primary:
+        monkeypatch.setattr(connection, "error", httpx.ReadTimeout("private timeout"))
+    client, consent = client_and_consent()
+    with pytest.raises(CollectionError) as caught:
+        client.verify_synthetic(consent)
+    assert caught.value.code == ("provider_network_error" if primary else "provider_cleanup_error")
+    assert "private" not in str(caught.value)
+    assert connection.calls[-1].close_count == 1
 
 
 @pytest.mark.parametrize(
