@@ -1,5 +1,19 @@
 # Repository 실행 규칙
 
+## 개발 하네스 연결
+
+범용 `ai-coding-harness` 0.1.1을 적용한다. 아래 경로는 Repository root 기준이다.
+
+- `harness/RULES.md`의 공통 원칙을 읽고 이 파일의 기존·하위 지침과 함께 적용한다.
+  이번 작업에서 이미 확인한 유효한 내용은 재사용하며, 중요한 충돌은 조용히 덮어쓰지 않는다.
+- 구현·수정 요청에서는 `.agents/skills/develop-change/SKILL.md`를 읽고 적용한다.
+  자동 Skill 선택에만 의존하지 않으며, 읽기 전용 조사·리뷰·계획·단순 질의에서 구현 workflow를 시작하지 않는다.
+- 프로젝트 정보는 이 파일의 기준 문서·기록·승인 규칙과 Root README의 `준비와 실행`·`검증`,
+  해당 문서가 연결한 실제 Runtime pin·Manifest·Lockfile·`Makefile`을 재사용한다.
+  이 연결은 별도 `PROJECT.md`를 요구하지 않는다.
+- 공통 원칙의 새 인수인계 체계 미생성은 기존 `current_status.md`·Bootstrap 운영을 대체하거나
+  중단한다는 뜻이 아니다. 현재 요청의 파일 수정 금지·승인 제한은 항상 지킨다.
+
 ## Context 활용과 문서
 
 - 이 파일과 작업 영역의 nested `AGENTS.md`, 공개 README를 먼저 읽는다. 관련 Source /
