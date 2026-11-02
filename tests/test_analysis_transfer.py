@@ -192,7 +192,7 @@ def test_full_preview_pages_media_and_consent_use_the_same_unmodified_input(db, 
     assert "privacy_review" not in saved["input_payload"]
 
 
-def test_collection_exclusions_survive_input_preview_and_consent_without_ai_detection(
+def test_collection_and_git_source_are_unmasked_in_preview_and_fixed_consent(
     db, git, tmp_path, monkeypatch
 ):
     def forbidden(*args, **kwargs):
@@ -220,19 +220,19 @@ def test_collection_exclusions_survive_input_preview_and_consent_without_ai_dete
     pid, cid = str(p["id"]), str(p["collections"][0]["id"])
     collect(db, cid, lambda: False)
     capture = db.detail(cid)
-    assert capture["state"] == "completed" and capture["policy"]["version"] == 5
+    assert capture["state"] == "completed" and capture["policy"]["version"] == 6
     records = db.all(
         "SELECT id,body_reason,body,sha256,content_id FROM working_records WHERE collection_id=%s",
         (cid,),
     )
     excluded = {str(r["id"]): r["body_reason"] for r in records if r["body_reason"]}
-    assert {"suspected_secret", "sensitive_path"} <= set(excluded.values())
+    assert not {"suspected_secret", "sensitive_path"} & set(excluded.values())
     assert all(
         r["body"] is None and r["sha256"] is None and r["content_id"] is None
         for r in records
         if str(r["id"]) in excluded
     )
-    assert collected_secret not in [bytes(r["body"]) for r in db.all("SELECT body FROM contents")]
+    assert collected_secret in [bytes(r["body"]) for r in db.all("SELECT body FROM contents")]
     store = Materials(db)
     uploaded = "api_key=syntheticUserSuppliedCredential456 /Users/synthetic-account/repo"
     store.add(pid, "user-input.txt", uploaded.encode())
@@ -252,13 +252,13 @@ def test_collection_exclusions_survive_input_preview_and_consent_without_ai_dete
     historical = [
         e for e in fixed.entries if json.loads(e.source_json)["kind"] == "historical_source"
     ]
-    assert any(e.reason == "suspected_secret" and e.text is None for e in historical)
-    assert any(e.reason == "sensitive_path" and e.text is None for e in historical)
+    assert any(e.text == collected_secret.decode() and e.reason is None for e in historical)
+    assert any(e.text == "synthetic environment body\n" and e.reason is None for e in historical)
     assert any(e.text == uploaded and e.reason is None for e in fixed.entries)
     preview = svc.transfer(pid, str(prep["id"]), download=True)
     texts = [c["text"] for c in preview["chunks"]]
     assert uploaded in texts and safe.decode() in texts
-    assert collected_secret.decode() not in canonical(preview)
+    assert any(collected_secret.decode() in text for text in texts)
     assert preview["input_digest"] == fixed.digest == prep["input_digest"]
     assert preview["transfer_digest"] == prep["descriptor"]["transfer_digest"]
     accepted = svc.submit(pid, submission(prep))
@@ -267,7 +267,7 @@ def test_collection_exclusions_survive_input_preview_and_consent_without_ai_dete
         "SELECT input_payload,consent FROM analysis_requests WHERE id=%s", (accepted["id"],)
     )
     assert saved["consent"]["input_digest"] == fixed.digest
-    assert collected_secret.decode() not in canonical(saved["input_payload"])
+    assert any(e["text"] == collected_secret.decode() for e in saved["input_payload"]["entries"])
     assert any(e["text"] == uploaded for e in saved["input_payload"]["entries"])
     assert db.detail(cid) == capture
     assert (

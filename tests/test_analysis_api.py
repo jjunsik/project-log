@@ -896,7 +896,9 @@ def test_http_disabled_is_read_only(db, tmp_path):
 def test_live_configuration_checks_metadata_without_reading_key(tmp_path, monkeypatch, model_id):
     from project_log.analysis_api import configured_profile
 
-    path = tmp_path / "synthetic-key-placeholder"
+    directory = tmp_path / ".project-log-secrets"
+    directory.mkdir(mode=0o700)
+    path = directory / "synthetic-key-placeholder"
     path.write_text("not-a-real-credential")
     path.chmod(0o600)
     monkeypatch.setenv("PROJECT_LOG_AI_ENABLED", "1")
@@ -921,7 +923,7 @@ def test_live_configuration_checks_metadata_without_reading_key(tmp_path, monkey
     path.chmod(0o644)
     assert configured_profile() is None
     path.chmod(0o600)
-    link = tmp_path / "link"
+    link = directory / "link"
     link.symlink_to(path)
     monkeypatch.setenv("PROJECT_LOG_GEMINI_KEY_FILE", str(link))
     assert configured_profile() is None
@@ -936,7 +938,9 @@ def test_live_35_profile_prepares_synthetic_input_without_key_read_or_model_call
         pytest.fail("Local preparation must not construct a Gemini model")
 
     monkeypatch.setattr("project_log.experience_gemini.ChatGoogleGenerativeAI", forbidden)
-    path = tmp_path / "synthetic-key-placeholder"
+    directory = tmp_path / ".project-log-secrets"
+    directory.mkdir(mode=0o700)
+    path = directory / "synthetic-key-placeholder"
     path.write_text("not-a-real-credential")
     path.chmod(0o600)
     monkeypatch.setenv("PROJECT_LOG_AI_ENABLED", "1")

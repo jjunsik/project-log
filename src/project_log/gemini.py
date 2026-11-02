@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from project_log.analysis_input import canonical
 from project_log.git import CollectionError
-from project_log.policy import sha256
+from project_log.policy import SERVICE_SECRETS_DIRECTORY, sha256
 
 HOST = "generativelanguage.googleapis.com"
 POLICY_VERSION = "gemini-unpaid-langchain-v1-2026-10-13"
@@ -83,11 +83,33 @@ def error_details(response: httpx.Response, maximum: int) -> dict[str, Any]:
         return {}
 
 
+def operator_secret_directory(path: Path) -> Path:
+    """Validate the dedicated private folder without opening a credential file."""
+    parent = path.absolute().parent
+    info = parent.lstat()
+    if (
+        parent.name != SERVICE_SECRETS_DIRECTORY
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise ValueError("Unsafe operator secret directory")
+    return parent
+
+
 def read_operator_key(path: Path) -> str:
     """No key in argv, repr, URLs or frontend. Reject shared/symlink/non-owned key files."""
     descriptor = -1
+    directory = -1
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        parent = operator_secret_directory(path)
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(directory)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("Unsafe operator secret directory")
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+        )
         info = os.fstat(descriptor)
         if (
             not stat.S_ISREG(info.st_mode)
@@ -102,11 +124,14 @@ def read_operator_key(path: Path) -> str:
         return key
     except (OSError, ValueError):
         raise CollectionError(
-            "operator_key_unavailable", "운영자 전용 API Key 파일과 소유·권한(600)을 확인하세요."
+            "operator_key_unavailable",
+            "전용 .project-log-secrets 폴더(700)와 API Key 파일의 소유·권한(600)을 확인하세요.",
         ) from None
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        if directory >= 0:
+            os.close(directory)
 
 
 @dataclass(frozen=True)

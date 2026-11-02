@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from project_log.git import CollectionError
-from project_log.policy import content_reason, sha256
+from project_log.policy import LEGACY_SENSITIVITY_REASONS, content_reason, sha256
 
 
 class CollectionStopped(Exception):
@@ -28,8 +28,10 @@ RECORDS = {
     "working_entries": "working_records",
 }
 POLICY_REASONS = {
+    # Legacy reasons remain readable; current collection never emits these two.
     "sensitive_path",
     "suspected_secret",
+    "system_path",
     "ignored_metadata_only",
     "untracked_metadata_only",
     "binary",
@@ -123,6 +125,20 @@ class Database:
     def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         with self.connect() as conn:
             conn.execute(query, params)
+
+    def legacy_body_exclusions(self, collection: str) -> dict[tuple[str, str], str]:
+        """Keep recorded exclusions; never inspect or recover their historical blobs."""
+        result: dict[tuple[str, str], str] = {}
+        for row in self.all(
+            "SELECT metadata,body_reason FROM change_records "
+            "WHERE collection_id=%s AND body_reason=ANY(%s)",
+            (collection, sorted(LEGACY_SENSITIVITY_REASONS)),
+        ):
+            meta = row["metadata"]
+            for side in ("old", "new"):
+                if meta.get(f"{side}_oid"):
+                    result[(meta[f"{side}_oid"], meta[side]["path_b64"])] = row["body_reason"]
+        return result
 
     def migrate(self) -> None:
         with self.connect() as conn:

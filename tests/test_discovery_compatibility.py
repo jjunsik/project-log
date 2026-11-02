@@ -174,9 +174,41 @@ def test_legacy_live_profile_matches_the_previously_observed_safe_metadata_hash(
     current = public_profile(
         {**execution_profile("gemini-3.5-flash-lite", mode="live"), "free_tier_confirmed": True}
     )
+    # Pin the historical notice from HEAD f5f4197; keep the observed hash unchanged.
+    historical = {
+        **legacy_profile(current),
+        "transfer_scope": (
+            "선택 범위의 보존 텍스트·코드·diff·문서와 출처 정보, 처리된 "
+            "PDF·이미지, 분석 지시를 전송합니다. AI 분석 단계에서는 "
+            "개인정보·민감정보·Secret을 자동 탐지·마스킹·가명 처리하지 "
+            "않습니다. 수집·Git 원본 조회에는 기존의 제한적인 Secret "
+            "검사·민감 경로 제외가 적용됩니다. 제외된 본문은 분석 입력에 포함되지 "
+            "않으며 완전한 민감정보 탐지를 보장하지 않습니다. 사용자가 전체 전송 "
+            "자료·제외/처리 한계와 제공 권한을 직접 확인해야 합니다. 전체 전송 "
+            "재료 JSON과 각 비텍스트 자료를 준비 화면에서 확인·다운로드할 수 "
+            "있습니다. 분할·중복 통합된 자료가 단계별 호출에 사용되며 후속 "
+            "문맥에는 이번 실행의 AI 응답도 포함됩니다. 제외된 본문과 DOCX "
+            "원본은 전송하지 않습니다. DOCX 추출 텍스트·파생 PDF/이미지는 "
+            "포함될 수 있습니다."
+        ),
+        "data_policy": (
+            "Google Gemini Developer API의 Unpaid "
+            "Services 정책을 적용합니다. 입력·응답은 Google 제품과 "
+            "ML 개선에 사용되고 사람이 검토할 수 있습니다. 민감·기밀·개인정보를 "
+            "전송하면 안 됩니다. AI 분석 단계의 별도 자동 보호는 제공하지 "
+            "않습니다. 사용자가 제공 권한과 PDF·이미지 내부 정보까지 직접 "
+            "확인해야 합니다. 사용자 확인이 서비스의 법적·기술적 책임을 모두 "
+            "면제하지는 않습니다. Free tier는 운영자 확인이며 실제 "
+            "Billing·비용을 증명하지 않습니다. 이미 시작된 외부 호출의 즉시 "
+            "중단·과금 취소는 보장하지 않습니다. 정책 확인: "
+            "https://ai.google.dev/gemini-api/terms "
+            "(안내 버전 2026-10-19)"
+        ),
+        "notice_version": ("analysis-consent-user-reviewed-collection-safety-2026-10-19"),
+    }
     value = db.one(
         "SELECT encode(sha256(convert_to(%s::jsonb::text,'UTF8')),'hex') AS digest",
-        (Jsonb(legacy_profile(current)),),
+        (Jsonb(historical),),
     )
     assert value["digest"] == "575dd70c016a722f2784fcb1b039a6f2b3d130217a46c73e32e5eec8dee300c6"
 

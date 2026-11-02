@@ -246,7 +246,11 @@ class Projects:
             raise CollectionError("repository_replaced", "등록 Repository가 변경됐습니다.")
         for file in git.tree(commit):
             if file["path_b64"] == path_b64:
-                body, reason, size = git.blob(file["oid"], file["path"], file["mode"])
+                reason = self.db.legacy_body_exclusions(collection).get((file["oid"], path_b64))
+                if reason:
+                    body, size = None, file["size"]
+                else:
+                    body, reason, size = git.blob(file["oid"], file["path"], file["mode"])
                 return {
                     **file,
                     "body": body.decode() if body is not None else None,

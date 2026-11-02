@@ -2,7 +2,6 @@
 
 import base64
 import hashlib
-import re
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -10,8 +9,15 @@ MAX_BODY = 1024 * 1024
 SNAPSHOT_BYTES = 16 * MAX_BODY
 SNAPSHOT_SECONDS = 5.0
 DOCUMENT_ROOT = b"docs"
+SERVICE_SECRETS_DIRECTORY = ".project-log-secrets"
+SYSTEM_PATHSPECS = [
+    b":(exclude,icase,glob)**/.project-log-secrets",
+    b":(exclude,icase,glob)**/.project-log-secrets/**",
+]
+# Read-only compatibility with already stored exclusions, never new detection results.
+LEGACY_SENSITIVITY_REASONS = frozenset({"sensitive_path", "suspected_secret"})
 POLICY = {
-    "version": 5,
+    "version": 6,
     "capture_branch": "configured_local_branch_checkout_required",
     "max_body_bytes": MAX_BODY,
     "snapshot_body_bytes": SNAPSHOT_BYTES,
@@ -28,30 +34,15 @@ POLICY = {
     "development_documents": "recursive_repository_root_docs_with_existing_safety_checks",
     "git_history": "collection_refs_and_head_reachable",
     "historical_source": "original_git_object_required",
+    "sensitivity": "user_review_only_no_automatic_detection",
+    "system_exclusions": [".git", SERVICE_SECRETS_DIRECTORY],
 }
 
 
-_SECRET_MARKERS = (
-    rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
-    rb"|(?:ghp_|github_pat_|sk-proj-|sk-ant-)[A-Za-z0-9_-]{16,}"
-    rb"|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}"
-    rb"|(?i:bearer\s+[a-z0-9._-]{16,})"
-    rb"|(?i:(?:password|passwd|api[_-]?key|access[_-]?token|secret|client_secret)"
-    rb"\s*[\"']?\s*[:=]\s*[\"']?[a-z0-9_+/=-]{8,})"
-)
-SECRET = re.compile(_SECRET_MARKERS + rb"|(?i:[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@)")
-
-
-def sensitive_path(path: str) -> bool:
-    parts = PurePosixPath(path.lower()).parts
-    return any(
-        part in {".git", ".ssh", ".aws", ".gnupg", ".kube", ".npmrc", ".pypirc", ".netrc"}
-        or part == ".env"
-        or part.startswith(".env.")
-        or part.startswith(("id_rsa", "id_ed25519", "credentials", "secrets"))
-        or part.endswith((".pem", ".key", ".p12", ".pfx", ".keystore"))
-        for part in parts
-    )
+def system_path(path: str | bytes) -> bool:
+    """Explicit system storage boundary, independent of content or inferred sensitivity."""
+    raw = path if isinstance(path, bytes) else path.encode("utf-8", errors="surrogateescape")
+    return bool({b".git", SERVICE_SECRETS_DIRECTORY.encode()} & set(raw.lower().split(b"/")))
 
 
 def content_reason(raw: bytes) -> str | None:
@@ -63,8 +54,6 @@ def content_reason(raw: bytes) -> str | None:
         raw.decode("utf-8")
     except UnicodeDecodeError:
         return "non_utf8"
-    if SECRET.search(raw):
-        return "suspected_secret"
     return None
 
 

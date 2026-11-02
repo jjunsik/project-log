@@ -118,8 +118,9 @@ const reasons:Record<string,string>={
   media_scratch_limit:'문서 처리 임시 공간 제한을 넘었습니다.',
   native_media_requires_manual_review:'시각적 개인정보·기밀성 및 전송 권한은 별도 확인이 필요합니다.',
   native_media_content_not_locally_verified:'원본 이미지·PDF의 내용을 로컬에서 사실 검증한 것은 아닙니다.',
-  suspected_secret:'수집·Git 원본 조회 정책의 Secret 의심 검사로 본문을 확보하지 않았습니다. AI 분석 단계의 새 탐지 결과가 아닙니다.',
-  sensitive_path:'수집·Git 원본 조회 정책의 민감 경로 제외로 본문을 확보하지 않았습니다. AI 분석 단계의 새 탐지 결과가 아닙니다.',
+  suspected_secret:'과거 수집 정책의 Secret 의심 검사로 확보하지 않은 본문입니다. 현재 자동 탐지 결과가 아니며 복원하지 않습니다.',
+  sensitive_path:'과거 수집 정책의 민감 경로 제외로 확보하지 않은 본문입니다. 현재 자동 탐지 결과가 아니며 복원하지 않습니다.',
+  system_path:'서비스 Secret 전용 폴더 또는 Git 내부 저장소 접근은 제한됩니다.',
   commit_personal_headers_excluded:'커밋 작성자 이름·email 등 개인 header는 AI 입력에서 제외했습니다.',
 };
 export function analysisReason(code:string):string {

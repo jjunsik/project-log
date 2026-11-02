@@ -13,7 +13,8 @@ Git History와 index·Working Tree·safe untracked, Root `docs/`의 안전한 �
 개발 경험 화면은 저장된 AI 후보·주장·UNKNOWN·보존 근거를 조회한다.
 후보 수정·승인, RAG, Agent 대화 수집, Codex 실행, Remote 연동은 지원하지 않는다.
 분석 종료 수집 선택·자료 준비·실제 전송 자료 확인·실행별 명시적 동의/접수·진행·취소·결과 이력을 제공한다.
-AI 입력·출력의 개인정보·민감정보·Secret 자동 탐지·마스킹은 제공하지 않는다. 사용자가 자료·제공 권한·Provider 조건을 직접 확인한다. 실제 전송은 운영자 명시 설정과 실행별 동의 전까지 비활성이다.
+수집·Git 원본 조회·AI 입력과 출력에서 개인정보·민감정보·Secret 자동 탐지·마스킹은 제공하지 않는다.
+사용자가 자료·제공 권한·Provider 조건을 직접 확인한다. 실제 전송은 운영자 명시 설정과 실행별 동의 전까지 비활성이다.
 
 ## 공개 구조와 실행
 
@@ -124,11 +125,11 @@ SQL migration을 개발·검증할 때 제품 Backend를 먼저 종료한다. `-
   관측 시간과 감지한 변경·누락을 남긴다. 본문 예산은 파일당 1 MiB, 전체 16 MiB다.
   5초 경과 후 새 본문 읽기를 제한하지만 전체 등록 요청의 5초 완료를 보장하지 않는다.
   status와 clean index 경로를 합친 관측 대상 20,000항목, Git 조회 timeout/output 제한 초과도 실패 처리한다.
-- non-ignored untracked regular text는 확장자 whitelist 없이 안전 검사를 거쳐 body와
+- non-ignored untracked regular text는 확장자 whitelist 없이 형식·크기를 확인해 body와
   raw-byte SHA-256을 보존한다. 일반 Source/Test/SQL/문서/config가 후보이며 config라는 이유로
-  제외하거나 안전하다고 가정하지 않는다. 기존의 제한적인 Secret 검사와 민감 파일명·경로 제외를 적용한다.
-  Secret 의심·민감 경로·Binary·비 UTF-8·대용량은 body/hash 없이 Metadata와 명시적 reason을 남긴다.
-  모든 개인정보·Secret·기밀정보를 탐지하지는 못하므로 수집 전에 직접 점검해야 한다.
+  제외하거나 안전하다고 가정하지 않는다. 본문·파일명으로 개인정보·민감정보·Secret을 자동 판별하지 않는다.
+  Binary·비 UTF-8·대용량은 body/hash 없이 Metadata와 명시적 reason을 남긴다.
+  수집 전에 자료와 제공 권한을 사용자가 직접 점검해야 한다.
   일반 ignored는 Metadata-only이며 directory 내부를 재귀 수집하지 않는다. symlink를 따라가지 않고
   submodule 내부는 수집하지 않는다. 정책상 제외와 실제 read/collection 오류를 별도로 표시한다.
 - Repository Root의 `docs/`는 장기 로컬 개발 문서 영역이다. Git ignored 상태여도 하위 디렉터리를
@@ -250,7 +251,13 @@ PoC의 과거 성공은 제품 검증 결과를 대신하지 않으며, 이 기�
 
 실제 전송은 기본 비활성이다. 운영자가 `PROJECT_LOG_AI_ENABLED=1`, 검토된 `PROJECT_LOG_GEMINI_MODEL`,
 `PROJECT_LOG_GEMINI_KEY_FILE` 경로와 `PROJECT_LOG_GEMINI_FREE_TIER_CONFIRMED=1`을 명시해야 한다.
-Key 파일은 본인 소유 일반 파일·권한600이어야 하며 준비 단계에서는 본문을 읽지 않는다.
+서비스 Secret은 전용 `.project-log-secrets/` 폴더에 보관하고 실제 값을 코드에 작성하지 않는다.
+폴더는 본인 소유·권한700, Key는 그 바로 아래 본인 소유 일반 파일·권한600이어야 한다. 폴더와 Key의 symlink는 거절한다.
+`PROJECT_LOG_GEMINI_KEY_FILE`은 해당 파일 경로를 참조하며 준비 단계에서는 Key 본문을 읽지 않는다.
+이 폴더명은 `.gitignore`에 등록돼 있고, 별도의 수집 경계로 Git History·index·Working Tree·untracked·Root docs/ 및
+AI용 Git 원본 조회에서 제외된다. ignore를 우회해 tracked된 파일도 수집하지 않는다.
+전용 폴더 내부를 Repository로 등록하는 것도 거절하며 symlink로 다른 이름을 지정해도 적용된다.
+기존 다른 위치의 Key를 앱이 자동 이동하거나 기존 운영 설정을 변경하지 않는다.
 이 설정은 Provider 접근 권한·Billing·비용 확인을 대신하지 않는다. 실행별 화면 동의도 필요하다.
 
 `gemini-3.5-flash-lite` Free Tier의 선택적 호출 제어는 다음 두 설정으로 켠다. 기본은 꺼져 있다.
@@ -260,6 +267,11 @@ Key 파일은 본인 소유 일반 파일·권한600이어야 하며 준비 단�
 export PROJECT_LOG_GEMINI_FREE_LIMITS=1
 export PROJECT_LOG_GEMINI_FREE_LIMITS_STATE="$PWD/.local/ai/gemini-free-limits/usage.json"
 ```
+
+현재 로컬 서비스는 위 두 설정을 유지한 정상 제품 API 운영 모드다(2026-10-20).
+`AI_PREPARATION_ONLY=0`·`AI_ENABLED=1`·`GEMINI_FREE_TIER_CONFIRMED=1`을 적용했다(각각 `PROJECT_LOG_` prefix).
+준비 전용 launcher의 Credential/외부 통신 차단은 적용하지 않으며, 실행별 동의·Digest·접수 검사는 유지한다.
+운영 전환 검증에서 실제 Gemini 호출은 수행하지 않았다. 새 분석 준비와 실제 Key 사용·외부 전송은 각각 별도 승인 대상이다.
 
 실제 SDK 전송 직전에 최근60초 RPM15·입력 TPM250,000을 확인하고 필요한 시간만 취소 가능하게 대기한다.
 요청 UTF-8 bytes+1,024로 토큰을 보수적으로 예약하고 응답의 실제 입력 토큰 수로 보정한다.
@@ -330,10 +342,12 @@ HTTP200 진단도 정상 분석 성공이나 기존400의 원인 해결을 뜻�
 로컬 입력 준비는 모든 완료 Collection의 보존 본문과 읽을 수 있는 과거 Git 객체, 지원 텍스트 추가 자료,
 native PDF/PNG/JPEG 및 DOCX text·내부 PNG/JPEG·로컬 변환 PDF를 다룬다. 미확보/보안 제외·형식/크기 제한과
 PDF 입력은 원본 사본·분할 페이지와 출처를 연결한다. 이미지 원본은 자동 축소하지 않는다.
-AI 입력·출력의 개인정보·민감정보·Secret 자동 탐지, 마스킹·가명 처리, 민감성 추정에 따른 제외·전체 차단은 제공하지 않는다.
-원본 수집·Git 원본 조회에는 기존 `content_reason`의 제한적인 Secret 검사와 `sensitive_path`의 민감 경로 제외를 유지한다.
-완전한 민감정보 탐지를 보장하지 않으며 수집 범위/ignore·형식·크기·symlink·오류 처리도 유지한다.
-과거 제외된 본문이나 기존 Collection을 새 정책으로 복원·변경하지 않는다.
+수집·Git 원본 조회·AI 입력과 출력의 개인정보·민감정보·Secret 자동 탐지, 마스킹·가명 처리,
+민감성 추정에 따른 제외·전체 차단은 제공하지 않는다. `.env`·인증서 등 이름만으로도 민감성을 판정하지 않는다.
+서비스 Secret 전용 폴더·Git 내부 저장소의 접근 제한과 수집 범위/ignore·형식·크기·symlink·오류 처리는 유지한다.
+과거 제외 reason과 미확보 본문은 보존하며 새 정책으로 기존 Collection을 복원·변경하지 않는다.
+전송 자료·Digest·실행별 명시 동의·접수·SDK 전송 경계는 유지한다. 변경 전 동의는 새 안내에 재사용하지 않으며,
+Checkpoint는 입력·출처·계약의 기존 호환 검증을 통과해야 재사용할 수 있다.
 
 등록·수집 전에 개인정보·Secret·기밀·제3자 자료와 제공 권한을 직접 점검한다. Git History·Diff·문서·미커밋 자료도
 수집될 수 있다. 필요하면 파일을 직접 임시 수정하고 수집 완료 후 직접 복구할 수 있지만, 현재 파일 수정은 과거 Commit·Diff나
@@ -369,12 +383,12 @@ Project와 사용 가능한 모델/한도를 확인한다. 무료 입력·응답
 API Key만으로 무료 tier를 확인할 수 없으므로 Billing이 연결된 Project에는 아래 명령을 실행하지 않는다.
 운영자 Key를 Git 제외 영역의 소유자 전용 파일에 안전하게 저장한다. 이용자에게 Key 입력을 요구하지 않는다.
 Key 실제 값을 명령 인자·Source·로그·채팅에 넣지 않는다.
-저장 위치는 Project Log Root의 `.local/ai/gemini-api-key`이며 Key 원문만 저장하고 권한은 `600`이다.
-기존 `/.local/` ignore가 적용된다. 최초 발급·저장은 운영자가 직접 진행한다.
+저장 위치는 Project Log Root의 `.project-log-secrets/gemini-api-key`이며 Key 원문만 저장하고 권한은 `600`이다.
+전용 폴더는 권한 `700`으로 만들고 Git ignore·자료 수집 제외를 적용한다. 최초 발급·저장과 기존 Key 이동은 운영자가 직접 진행한다.
 
 ```sh
 # 지정 파일에는 Key만 저장하고 chmod 600으로 소유자 접근만 허용한다.
-export PROJECT_LOG_GEMINI_KEY_FILE="$PWD/.local/ai/gemini-api-key"
+export PROJECT_LOG_GEMINI_KEY_FILE="$PWD/.project-log-secrets/gemini-api-key"
 # 가격표의 무료 모델 검토 범위 안에서 명시적으로 선택한다. 제품 모델 확정이 아니다.
 export PROJECT_LOG_GEMINI_MODEL="gemini-3.1-flash-lite"
 # 동의 전에는 안내만 출력하며 외부 호출이나 Key 조회를 하지 않는다.

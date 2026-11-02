@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from project_log.policy import MAX_BODY, content_reason, path_info, sensitive_path
+from project_log.policy import MAX_BODY, content_reason, path_info, system_path
 from project_log.self_workflow import is_self_repository, pathspecs, workflow_path
 
 
@@ -235,9 +235,7 @@ class Git:
         return result
 
     def status(self) -> bytes:
-        scope_args: list[str | bytes] = (
-            ["--", *pathspecs(self.root)] if is_self_repository(self.root) else []
-        )
+        scope_args: list[str | bytes] = ["--", *pathspecs(self.root)]
         # status can execute clean/process filters while comparing equal-size working files.
         # Read effective config names (including local includes), then override those drivers.
         keys = self.run(
@@ -261,8 +259,6 @@ class Git:
             "--ignore-submodules=all",
             *scope_args,
         )
-        if not scope_args:
-            return raw
         # Git may emit collapsed ignored directory markers despite an exclude pathspec.
         tokens = iter(raw.split(b"\0"))
         retained = []
@@ -270,12 +266,16 @@ class Git:
             if not token:
                 continue
             previous = next(tokens) if b"R" in token[:2] or b"C" in token[:2] else None
-            if workflow_path(token[3:]):
+            if system_path(token[3:]) or (
+                is_self_repository(self.root) and workflow_path(token[3:])
+            ):
                 continue
-            if previous is not None and workflow_path(previous):
+            if previous is not None and (
+                system_path(previous) or (is_self_repository(self.root) and workflow_path(previous))
+            ):
                 raise CollectionError(
                     "workflow_boundary_unavailable",
-                    "개인 workflow 경계를 기존 상태 표현으로 분리하지 못했습니다.",
+                    "수집 제외 경계를 기존 상태 표현으로 분리하지 못했습니다.",
                 )
             retained.append(token)
             if previous is not None:
@@ -283,9 +283,7 @@ class Git:
         return b"\0".join(retained) + (b"\0" if retained else b"")
 
     def index(self) -> bytes:
-        scope_args: list[str | bytes] = (
-            ["--", *pathspecs(self.root)] if is_self_repository(self.root) else []
-        )
+        scope_args: list[str | bytes] = ["--", *pathspecs(self.root)]
         return self.run(
             "ls-files",
             "--stage",
@@ -296,13 +294,13 @@ class Git:
     def blob(
         self, oid: str, path: str, mode: str = "100644"
     ) -> tuple[bytes | None, str | None, int | None]:
+        if system_path(path):
+            return None, "system_path", None
         if mode == "160000":
             return None, "submodule", None
         if mode == "120000":
             return None, "symlink", None
         size = int(self.object_read("cat-file", "-s", oid))
-        if sensitive_path(path):
-            return None, "sensitive_path", size
         if size > MAX_BODY:
             return None, "large", size
         raw = self.object_read("cat-file", "blob", oid, limit=MAX_BODY)
@@ -341,6 +339,8 @@ class Git:
             if not record:
                 continue
             info, path = record.split(b"\t", 1)
+            if system_path(path):
+                continue
             mode, kind, oid, size = info.split()
             result.append(
                 {
@@ -364,6 +364,8 @@ def diagnose(value: str) -> tuple[Git, dict[str, Any]]:
         raise CollectionError(
             "invalid_path", "존재하고 접근 가능한 프로젝트 폴더를 입력하세요."
         ) from exc
+    if system_path(os.fsencode(path)):
+        raise CollectionError("system_path", "시스템 전용 폴더는 프로젝트로 등록할 수 없습니다.")
     git = Git(path)
     root = Path(os.fsdecode(git.run("rev-parse", "--show-toplevel").rstrip(b"\n"))).resolve()
     if root != path:
@@ -432,6 +434,8 @@ def read_working(root: Path, raw_path: bytes) -> tuple[bytes | None, str | None,
     parts = raw_path.split(b"/")
     if any(p in {b"", b".", b".."} for p in parts):
         return None, "unsafe_path", {}
+    if system_path(raw_path):
+        return None, "system_path", {}
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in parts[:-1]:
@@ -442,8 +446,6 @@ def read_working(root: Path, raw_path: bytes) -> tuple[bytes | None, str | None,
         meta = {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "mode": info.st_mode}
         if not stat.S_ISREG(info.st_mode):
             return None, "symlink" if stat.S_ISLNK(info.st_mode) else "non_regular", meta
-        if sensitive_path(os.fsdecode(raw_path)):
-            return None, "sensitive_path", meta
         if info.st_size > MAX_BODY:
             return None, "large", meta
         file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)

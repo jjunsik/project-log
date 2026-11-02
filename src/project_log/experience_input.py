@@ -13,7 +13,7 @@ from project_log.db import Database, Row
 from project_log.document_media import prepare_pdf, render_docx
 from project_log.git import CollectionError, diagnose
 from project_log.materials import FORMATS, TEXT_FORMATS, Materials, validate_format
-from project_log.policy import MAX_BODY, content_reason, sensitive_path, sha256
+from project_log.policy import MAX_BODY, content_reason, sha256, system_path
 
 EXPERIENCE_INPUT_POLICY = "experience-input-v3-user-reviewed"
 MAX_MEDIA_BYTES = 20 * MAX_BODY
@@ -330,11 +330,14 @@ class ExperienceInputs:
         tree_cache: dict[str, list[Row]] = {}
         blob_cache: dict[str, bytes] = {}
         resolved: dict[tuple[str, str, str, str], Evidence] = {}
+        legacy_exclusions: dict[str, dict[tuple[str, str], str]] = {}
         for entry in snapshot.entries:
             source = json.loads(entry.source_json)
             if source["kind"] not in {"commits", "head_files"}:
                 continue
             cid = source["collection_id"]
+            if cid not in legacy_exclusions:
+                legacy_exclusions[cid] = self.db.legacy_body_exclusions(cid)
             commit = source.get("oid") if source["kind"] == "commits" else None
             if commit is None:
                 # HEAD observations remain in the manifest, including commitless/no-body cases.
@@ -374,14 +377,16 @@ class ExperienceInputs:
                         "provenance": "original_git_object_read_now",
                     }
                     reason = (
-                        "sensitive_path"
-                        if sensitive_path(file["path"])
+                        "system_path"
+                        if system_path(file["path"])
                         else "symlink"
                         if file["mode"] == "120000"
                         else "submodule"
                         if file["mode"] == "160000"
                         else None
                     )
+                    # Stored exclusions are evidence, not a request to recover old bytes.
+                    reason = reason or legacy_exclusions[cid].get((file["oid"], file["path_b64"]))
                     blob_raw: bytes | None = None
                     if not reason:
                         try:

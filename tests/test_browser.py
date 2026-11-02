@@ -85,7 +85,7 @@ def test_historical_structure_body_variants_and_commits(db, git, tmp_path):
                 f"/api/collections/{cid}/content/working_entries/{variant['id']}"
             ).json()
             if file["name"] == ".env":
-                assert body == {"body": None, "body_reason": "sensitive_path"}
+                assert body["body"] == "private\n" and body["body_reason"] is None
             else:
                 assert body["body"] == "Local then\n"
         commits = client.get(f"/api/collections/{cid}/commits").json()

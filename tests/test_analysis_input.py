@@ -110,7 +110,7 @@ def test_completed_collections_project_isolation_freeze_and_provenance(db, git, 
     assert len(commits) == 1 and "Fix example counter" in commits[0].text
     assert "test@example.invalid" not in commits[0].text
     assert "Synthetic Developer" not in commits[0].text
-    assert any(e.reason == "sensitive_path" for e in snapshot.entries)
+    assert any(e.text == "PASSWORD=syntheticvalue\n" and e.reason is None for e in snapshot.entries)
     assert any(e.reason == "historical_source_not_preserved" for e in snapshot.entries)
     user = {e.reference: e for e in snapshot.entries if e.reference.startswith("material/")}
     assert user[f"material/{original['id']}"].text == "This is a user supplied note."

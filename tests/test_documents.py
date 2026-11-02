@@ -140,24 +140,26 @@ def test_ignored_documents_safety_and_read_errors(db, git, tmp_path, monkeypatch
     assert result["state"] == "cleanup_pending" and not result["snapshot"]["complete"]
     rows = inventory(db, cid)
     for name, reason in {
-        "secret": "suspected_secret",
-        ".env": "sensitive_path",
         "binary": "binary",
         "encoding": "non_utf8",
         "large": "large",
         "link": "symlink",
         "fifo": "non_regular",
-        ".ssh": "sensitive_path",
         "read-error": "unreadable_or_symlink_parent",
     }.items():
         row = rows[("document", f"docs/{name}", 0)]
         assert row["body"] is None and row["sha256"] is None and row["content_id"] is None
         assert row["body_reason"] == reason
-    assert not any(k[1].endswith("hidden") for k in rows)
+    for name in ("safe", "secret", ".env"):
+        assert bytes(rows[("document", f"docs/{name}", 0)]["body"]) == bodies[name]
+    assert bytes(rows[("document", "docs/.ssh/hidden", 0)]["body"]) == b"not traversed\n"
+    assert not any(k[1].startswith("docs/link/") for k in rows)
     assert result["summary"]["body_errors"] == [
         {"reason": "unreadable_or_symlink_parent", "count": 1},
     ]
-    assert "suspected_secret" in {r["reason"] for r in result["summary"]["body_exclusions"]}
+    assert not {"suspected_secret", "sensitive_path"} & {
+        r["reason"] for r in result["summary"]["body_exclusions"]
+    }
 
 
 @pytest.mark.parametrize("budget", ["bytes", "seconds"])

@@ -4,6 +4,8 @@ import base64
 from pathlib import Path
 from typing import Any
 
+from project_log.policy import SYSTEM_PATHSPECS
+
 SELF_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_ROOTS = (b"current_status.md", b"chatgpt")
 
@@ -13,12 +15,15 @@ def is_self_repository(root: Path) -> bool:
 
 
 def pathspecs(root: Path) -> list[bytes]:
-    return (
-        # A literal Git pathspec also excludes directory descendants. Match this file exactly.
-        [b":(top,exclude,glob)current_status.m[d]", b":(top,exclude,literal)chatgpt"]
-        if is_self_repository(root)
-        else []
-    )
+    return [
+        *SYSTEM_PATHSPECS,
+        *(
+            # A literal Git pathspec also excludes directory descendants. Match this file exactly.
+            [b":(top,exclude,glob)current_status.m[d]", b":(top,exclude,literal)chatgpt"]
+            if is_self_repository(root)
+            else []
+        ),
+    ]
 
 
 def workflow_path(path: bytes) -> bool:

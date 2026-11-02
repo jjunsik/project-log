@@ -190,14 +190,18 @@ def test_safe_untracked_all_text_configs_secrets_and_read_failure(db, git, tmp_p
     finally:
         unreadable.chmod(0o600)
     rows = inventory(db, cid)
-    for path in ("application.yml", "application.properties", "unknown.extension"):
+    for path in (
+        "application.yml",
+        "application.properties",
+        "unknown.extension",
+        "bad.yml",
+        "hardcoded.py",
+        ".env",
+    ):
         row = rows[("untracked", path, 0)]
         assert bytes(row["body"]) == bodies[path]
         assert row["sha256"] == hashlib.sha256(bodies[path]).hexdigest()
     expected = {
-        "bad.yml": "suspected_secret",
-        "hardcoded.py": "suspected_secret",
-        ".env": "sensitive_path",
         "binary": "binary",
         "encoding": "non_utf8",
         "large": "large",
@@ -216,9 +220,11 @@ def test_safe_untracked_all_text_configs_secrets_and_read_failure(db, git, tmp_p
     assert {r["reason"] for r in result["summary"]["body_errors"]} == {
         "unreadable_or_symlink_parent"
     }
-    assert "suspected_secret" in {r["reason"] for r in result["summary"]["body_exclusions"]}
+    assert not {"suspected_secret", "sensitive_path"} & {
+        r["reason"] for r in result["summary"]["body_exclusions"]
+    }
     stored = [bytes(r["body"]) for r in db.all("SELECT body FROM contents")]
-    assert bodies["bad.yml"] not in stored and bodies["hardcoded.py"] not in stored
+    assert bodies["bad.yml"] in stored and bodies["hardcoded.py"] in stored
 
 
 def test_commitless_staged_working_untracked_and_untracked_rename(db, git, tmp_path):

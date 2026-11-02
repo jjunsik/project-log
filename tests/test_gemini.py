@@ -262,7 +262,9 @@ def test_blocked_incomplete_malformed_and_unsupported_evidence(
 
 
 def test_operator_key_permissions_symlink_and_safe_environment(tmp_path, monkeypatch):
-    key = tmp_path / "key"
+    directory = tmp_path / ".project-log-secrets"
+    directory.mkdir(mode=0o700)
+    key = directory / "key"
     key.write_text("synthetic-test-key\n")
     key.chmod(0o600)
     assert read_operator_key(key) == "synthetic-test-key"
@@ -278,7 +280,7 @@ def test_operator_key_permissions_symlink_and_safe_environment(tmp_path, monkeyp
     with pytest.raises(CollectionError):
         read_operator_key(key)
     key.chmod(0o600)
-    link = tmp_path / "link"
+    link = directory / "link"
     link.symlink_to(key)
     with pytest.raises(CollectionError):
         read_operator_key(link)

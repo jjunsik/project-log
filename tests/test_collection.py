@@ -244,7 +244,7 @@ def test_staged_unstaged_untracked_ignored_and_no_target_writes(db, git, tmp_pat
     assert (root / ".env").read_text() == "PASSWORD=synthetic-credential-only\n"
 
 
-def test_secrets_binary_large_symlinks_and_unusual_paths(db, git, tmp_path):
+def test_manual_sensitivity_review_preserves_technical_limits(db, git, tmp_path):
     root = tmp_path / "repo"
     (root / ".env").write_text("hidden\n")
     (root / "token.txt").write_text("api_key = syntheticvalue1234567890\n")
@@ -262,11 +262,13 @@ def test_secrets_binary_large_symlinks_and_unusual_paths(db, git, tmp_path):
         r["body_reason"]
         for r in db.all("SELECT body_reason FROM change_records WHERE collection_id=%s", (cid,))
     }
-    assert {"sensitive_path", "suspected_secret", "binary", "large", "symlink"} <= reasons
+    assert {"binary", "large", "symlink"} <= reasons
+    assert not {"sensitive_path", "suspected_secret"} & reasons
     diffs = b"".join(
         bytes(r["diff"]) for r in db.all("SELECT diff FROM change_records WHERE diff IS NOT NULL")
     )
-    assert b"syntheticvalue" not in diffs and b"safe content" in diffs
+    assert b"syntheticvalue" in diffs and b"safe content" in diffs
+    assert b"hidden" in diffs
     assert read_working(root, b"link")[1] == "symlink"
     (root / "parent").symlink_to(tmp_path, target_is_directory=True)
     assert read_working(root, b"parent/outside")[0] is None
@@ -554,11 +556,9 @@ def test_diff_path_does_not_include_new_directory_descendants(db, git, tmp_path)
     )
     rename = next(r for r in rows if r["metadata"]["status"].startswith("R"))
     assert b"safe text" in bytes(rename["diff"])
-    assert b"PRIVATE_FIXTURE_CONTENT" not in b"".join(bytes(r["diff"] or b"") for r in rows)
-    assert (
-        next(r for r in rows if r["metadata"]["new"]["path"].endswith(".env"))["body_reason"]
-        == "sensitive_path"
-    )
+    assert b"PRIVATE_FIXTURE_CONTENT" not in bytes(rename["diff"])
+    env = next(r for r in rows if r["metadata"]["new"]["path"].endswith(".env"))
+    assert env["body_reason"] is None and b"PRIVATE_FIXTURE_CONTENT" in bytes(env["diff"])
 
 
 def test_interrupted_snapshot_is_removed_and_new_manual_observes_new_bytes(

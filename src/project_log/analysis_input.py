@@ -12,7 +12,7 @@ from xml.etree import ElementTree
 from project_log.db import RECORDS, Database, Row
 from project_log.git import CollectionError
 from project_log.materials import TEXT_FORMATS, Materials, validate_format
-from project_log.policy import MAX_BODY, sensitive_path, sha256
+from project_log.policy import MAX_BODY, sha256, system_path
 
 INPUT_POLICY = "analysis-input-v2-user-reviewed"
 MAX_INPUT_BYTES = 16 * MAX_BODY
@@ -336,7 +336,7 @@ class AnalysisInput:
                                 source,
                                 None,
                                 path_reason
-                                or ("sensitive_path" if sensitive_path(name) else None)
+                                or ("system_path" if system_path(name) else None)
                                 or "historical_source_not_preserved",
                                 (name,),
                             )

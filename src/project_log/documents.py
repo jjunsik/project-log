@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from project_log.policy import DOCUMENT_ROOT, SNAPSHOT_SECONDS, path_info, sensitive_path, sha256
+from project_log.policy import DOCUMENT_ROOT, SNAPSHOT_SECONDS, path_info, sha256, system_path
 
 
 def scan_documents(
@@ -34,6 +34,8 @@ def scan_documents(
         stack = [document_root]
         while stack:
             path = stack.pop()
+            if system_path(path):
+                continue
             if visited >= 20000 or time.monotonic() - start >= SNAPSHOT_SECONDS:
                 reason = "snapshot_entry_limit" if visited >= 20000 else "snapshot_budget"
                 entry = {**path_info(path), "document_root": path_info(document_root)}
@@ -66,8 +68,6 @@ def scan_documents(
                 )
                 if stat.S_ISLNK(info.st_mode):
                     record(path, document_root, "symlink", meta)
-                elif sensitive_path(os.fsdecode(path)):
-                    record(path, document_root, "sensitive_path", meta)
                 elif stat.S_ISDIR(info.st_mode):
                     child = os.open(
                         parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd

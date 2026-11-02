@@ -1,5 +1,6 @@
 .env
 .env.*
+.project-log-secrets/
 /docs/
 /current_status.md
 /chatgpt/
@@ -32,3 +33,5 @@
 /.pytest_cache/
 /.mypy_cache/
 /.ruff_cache/
+
+/node_modules/

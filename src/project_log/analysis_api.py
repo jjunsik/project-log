@@ -3,6 +3,7 @@
 import os
 import stat
 from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Response
@@ -13,16 +14,15 @@ from project_log.analysis_execution import execution_profile
 from project_log.analysis_recovery import changed_request_resume, daily_reset, resume_block
 from project_log.analysis_worker import AnalysisWorker
 from project_log.db import Database, Row
-from project_log.gemini import REVIEWED_MODELS
+from project_log.gemini import REVIEWED_MODELS, operator_secret_directory
 from project_log.git import CollectionError
 
 TERMS = "https://ai.google.dev/gemini-api/terms"
 TRANSFER = (
     "선택 범위의 보존 텍스트·코드·diff·문서와 출처 정보, "
     "처리된 PDF·이미지, 분석 지시를 전송합니다. "
-    "AI 분석 단계에서는 개인정보·민감정보·Secret을 자동 탐지·마스킹·가명 처리하지 않습니다. "
-    "수집·Git 원본 조회에는 기존의 제한적인 Secret 검사·민감 경로 제외가 적용됩니다. "
-    "제외된 본문은 분석 입력에 포함되지 않으며 완전한 민감정보 탐지를 보장하지 않습니다. "
+    "수집·Git 원본 조회·AI 입력과 출력에서 개인정보·민감정보·Secret을 자동 판별하거나 "
+    "마스킹·가명 처리하지 않습니다. 서비스 Secret 전용 폴더는 수집에서 제외됩니다. "
     "사용자가 전체 전송 자료·제외/처리 한계와 제공 권한을 직접 확인해야 합니다. "
     "전체 전송 재료 JSON과 각 비텍스트 자료를 준비 화면에서 확인·다운로드할 수 있습니다. "
     "분할·중복 통합된 자료가 단계별 호출에 사용되며 "
@@ -34,12 +34,12 @@ POLICY = (
     "Google Gemini Developer API의 Unpaid Services 정책을 적용합니다. "
     "입력·응답은 Google 제품과 ML 개선에 사용되고 사람이 검토할 수 있습니다. "
     "민감·기밀·개인정보를 전송하면 안 됩니다. "
-    "AI 분석 단계의 별도 자동 보호는 제공하지 않습니다. 사용자가 제공 권한과 "
+    "자료의 민감성 자동 판별은 제공하지 않습니다. 사용자가 제공 권한과 "
     "PDF·이미지 내부 정보까지 직접 확인해야 합니다. "
     "사용자 확인이 서비스의 법적·기술적 책임을 모두 면제하지는 않습니다. "
     "Free tier는 운영자 확인이며 실제 Billing·비용을 "
     "증명하지 않습니다. 이미 시작된 외부 호출의 즉시 중단·과금 취소는 보장하지 않습니다. "
-    f"정책 확인: {TERMS} (안내 버전 2026-10-19)"
+    f"정책 확인: {TERMS} (안내 버전 2026-10-28)"
 )
 
 
@@ -63,9 +63,9 @@ def public_profile(profile: Row) -> Row:
             else ""
         )
         + POLICY,
-        "notice_version": "analysis-preparation-only-user-reviewed-collection-safety-2026-10-19"
+        "notice_version": "analysis-preparation-only-user-reviewed-system-boundary-2026-10-28"
         if preparation_only
-        else "analysis-consent-user-reviewed-collection-safety-2026-10-19",
+        else "analysis-consent-user-reviewed-system-boundary-2026-10-28",
     }
 
 
@@ -90,6 +90,7 @@ def configured_profile() -> Row | None:
     ):
         return None
     try:
+        operator_secret_directory(Path(os.environ["PROJECT_LOG_GEMINI_KEY_FILE"]))
         info = os.lstat(os.environ["PROJECT_LOG_GEMINI_KEY_FILE"])
         if (
             not stat.S_ISREG(info.st_mode)
@@ -99,7 +100,7 @@ def configured_profile() -> Row | None:
             or not 0 < info.st_size <= 256
         ):
             return None
-    except OSError:
+    except (OSError, ValueError):
         return None
     return public_profile({**execution_profile(model, mode="live"), "free_tier_confirmed": True})
 
