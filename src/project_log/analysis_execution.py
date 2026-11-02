@@ -16,18 +16,29 @@ from project_log.analysis_checkpoints import (
     validate_rows,
 )
 from project_log.analysis_diagnostic import validate_execution
+from project_log.analysis_events import (
+    DURABILITY_POLICY,
+    AnalysisFault,
+    append_event,
+    failure_details,
+    fallback_result,
+    system_event,
+    validated_candidates,
+)
 from project_log.analysis_input import canonical
 from project_log.analysis_recovery import relation_budget
 from project_log.analysis_snapshot import decode_snapshot
 from project_log.analysis_transfer import TRANSFER_POLICY
 from project_log.db import Database, Row
 from project_log.experience_input import EXPERIENCE_INPUT_POLICY, ExperienceInput
+from project_log.experience_planning import PLANNING_POLICY
 from project_log.experience_relations import relation_recovery_policy
 from project_log.experience_store import Experiences
 from project_log.experiences import (
     ANALYSIS_POLICY,
     BASE_INSTRUCTION,
     CONSOLIDATION_POLICY,
+    FAILURE_POLICY,
     RESPONSE_SCHEMAS,
     TASK_INSTRUCTIONS,
     AnalysisResult,
@@ -49,6 +60,9 @@ def execution_profile(model: str, *, mode: str = "isolated") -> Row:
         "mode": mode,
         "input_policy": EXPERIENCE_INPUT_POLICY,
         "graph_policy": ANALYSIS_POLICY,
+        "failure_policy": FAILURE_POLICY,
+        "durability_policy": DURABILITY_POLICY,
+        "planning_policy": PLANNING_POLICY,
         "transfer_policy": TRANSFER_POLICY,
         "checkpoint_policy": CHECKPOINT_POLICY,
         "consolidation_policy": CONSOLIDATION_POLICY,
@@ -219,6 +233,7 @@ class ExecutionState:
         variant: str | None = None,
         feedback_code: str | None = None,
         logical_digest: str | None = None,
+        unit_request_digest: str | None = None,
     ) -> None:
         if self.profile and self.profile.get("preparation_only"):
             raise CollectionError("analysis_transfer_disabled", "로컬 준비 전용입니다.")
@@ -232,6 +247,9 @@ class ExecutionState:
                 raise CollectionError("analysis_stopped", "새 모델 호출은 허용되지 않습니다.")
             assert self.profile is not None
             diagnostic = validate_execution(row, self.diagnostic_target)
+            if self.profile.get("failure_policy") == FAILURE_POLICY and not diagnostic:
+                if not isinstance(unit_request_digest, str) or len(unit_request_digest) != 64:
+                    raise invalid()
             identity = None
             if phase == "reconcile" and not diagnostic and self.profile.get("relation_recovery"):
                 if logical_digest is None:
@@ -267,9 +285,19 @@ class ExecutionState:
             conn.execute(
                 "INSERT INTO analysis_calls"
                 "(request_id,project_id,generation,owner_token,seq,phase,"
-                "payload_digest,logical_digest) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                (request, project, self.generation, owner, seq, phase, digest, identity),
+                "payload_digest,logical_digest,unit_request_digest) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    request,
+                    project,
+                    self.generation,
+                    owner,
+                    seq,
+                    phase,
+                    digest,
+                    identity,
+                    unit_request_digest,
+                ),
             )
             conn.execute(
                 "UPDATE analysis_requests SET call_seq=%s,phase=%s WHERE id=%s",
@@ -314,6 +342,10 @@ class ExecutionState:
             if (
                 not attempt
                 or attempt["phase"] != task
+                or (
+                    self.profile.get("failure_policy") == FAILURE_POLICY
+                    and attempt["unit_request_digest"] != item["request_digest"]
+                )
                 or attempt["outcome"] != "responded"
                 or attempt["error_code"] is not None
                 or str(attempt["owner_token"]) != owner
@@ -341,6 +373,64 @@ class ExecutionState:
                     row["call_seq"],
                 ),
             )
+
+    def journal(self, project: str, request: str, owner: str, payload: Row) -> None:
+        with self.locked(project, request) as (conn, row):
+            self.owned(row, owner)
+            if (
+                row["state"] not in {"running", "cancel_requested"}
+                or self.profile is None
+                or self.profile.get("durability_policy") != DURABILITY_POLICY
+            ):
+                raise CollectionError(
+                    "analysis_event_unavailable", "실행 이력 저장 소유권이 종료됐습니다."
+                )
+            if len(canonical(payload).encode()) > self.profile["result_max_bytes"]:
+                raise AnalysisFault(
+                    "analysis_event_too_large",
+                    "event_commit",
+                    "bytes_gt_limit",
+                    limit_bytes=self.profile["result_max_bytes"],
+                    measured_bytes=len(canonical(payload).encode()),
+                )
+            append_event(conn, row, payload)
+
+    def commit_resolved(self, project: str, request: str, owner: str, state: str) -> None:
+        with self.locked(project, request, ready=False) as (conn, row):
+            self.owned(row, owner)
+            if (
+                row["consent"]["descriptor"]["profile"].get("durability_policy")
+                == DURABILITY_POLICY
+            ):
+                system_event(
+                    conn,
+                    row,
+                    "commit_outcome_resolved",
+                    "result_commit",
+                    {
+                        "state": state,
+                        "result_run_id": str(row["result_run_id"])
+                        if row["result_run_id"]
+                        else None,
+                        "condition": "durable_terminal_row_observed",
+                        "cause_status": "CONFIRMED",
+                    },
+                )
+
+    def diagnostic(self, project: str, request: str, owner: str, code: str, details: Row) -> None:
+        with self.locked(project, request, ready=False) as (conn, row):
+            self.owned(row, owner)
+            if (
+                row["consent"]["descriptor"]["profile"].get("durability_policy")
+                == DURABILITY_POLICY
+            ):
+                system_event(
+                    conn,
+                    row,
+                    "finalization_failed",
+                    details.get("stage", "unknown"),
+                    {"code": code, **details},
+                )
 
     def relation_state(self, project: str, request: str, owner: str, logical_digest: str) -> Row:
         with self.locked(project, request) as (conn, row):
@@ -400,6 +490,7 @@ class ExecutionState:
         code: str | None = None,
         snapshot: ExperienceInput | None = None,
         result: AnalysisResult | None = None,
+        recover_partial: bool = False,
     ) -> None:
         # Supervisor calls only after join/quiescence. Cancellation is authoritative.
         with self.locked(
@@ -415,6 +506,36 @@ class ExecutionState:
                 else "failed"
             )
             run = None
+            durable = bool(
+                row.get("consent")
+                and row["consent"]["descriptor"]["profile"].get("durability_policy")
+                == DURABILITY_POLICY
+            )
+            if (
+                recover_partial
+                and result is None
+                and row["state"] == "running"
+                and code
+                and code != "analysis_stopped"
+                and durable
+            ):
+                try:
+                    recovered = fallback_result(conn, row, code)
+                    if recovered:
+                        snapshot, result = recovered
+                except CollectionError as exc:
+                    system_event(
+                        conn,
+                        row,
+                        "finalization_failed",
+                        "partial_result",
+                        {
+                            "code": exc.code,
+                            "primary_code": code,
+                            **failure_details(exc, "partial_result"),
+                            "operation": "partial_materialization",
+                        },
+                    )
             if result is not None and row["state"] == "running":
                 if row["consent"]["descriptor"].get("diagnostic"):
                     raise CollectionError(
@@ -429,16 +550,81 @@ class ExecutionState:
                     raise CollectionError(
                         "analysis_input_mismatch", "결과와 고정 입력이 일치하지 않습니다."
                     )
-                run = Experiences(self.db).insert(
-                    conn, snapshot, result, model=self.profile["model"], mode=self.profile["mode"]
-                )
-                state = "completed"
+                if self.profile.get("failure_policy") == FAILURE_POLICY:
+                    coverage = result.coverage
+                    if (
+                        coverage.get("failure_policy") != FAILURE_POLICY
+                        or coverage.get("analysis_status") not in {"complete", "partial"}
+                        or not isinstance(coverage.get("unresolved"), list)
+                        or (coverage["analysis_status"] == "partial")
+                        != bool(coverage["unresolved"])
+                    ):
+                        raise AnalysisFault(
+                            "analysis_result_state_invalid",
+                            "result_state",
+                            "partial_status_mismatch",
+                            analysis_status=coverage.get("analysis_status"),
+                            unresolved_is_list=isinstance(coverage.get("unresolved"), list),
+                            unresolved_count=len(coverage.get("unresolved", []))
+                            if isinstance(coverage.get("unresolved"), list)
+                            else None,
+                        )
+                if durable:
+                    certified = {c["id"]: c for c in validated_candidates(conn, row)}
+                    actual = {c.id: c.model_dump() for c in result.candidates}
+                    if actual != certified:
+                        raise AnalysisFault(
+                            "analysis_result_candidates_invalid",
+                            "result_state",
+                            "candidate_certificate_mismatch",
+                            result_candidate_count=len(actual),
+                            certified_candidate_count=len(certified),
+                        )
+                    result.coverage["history_request_id"] = request
+                try:
+                    run = Experiences(self.db).insert(
+                        conn,
+                        snapshot,
+                        result,
+                        model=self.profile["model"],
+                        mode=self.profile["mode"],
+                    )
+                except (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure):
+                    raise
+                except CollectionError:
+                    raise
+                except Exception as exc:
+                    raise AnalysisFault(
+                        "analysis_result_persist_failed",
+                        "result_persist",
+                        "database_error" if isinstance(exc, psycopg.Error) else "unknown",
+                        sqlstate=getattr(exc, "sqlstate", None),
+                        exception_type=type(exc).__name__,
+                    ) from None
+                if result.coverage.get("analysis_status") == "partial":
+                    state, code = "failed", result.coverage.get("stop_code") or "analysis_partial"
+                else:
+                    state = "completed"
             conn.execute(
                 "UPDATE analysis_requests SET state=%s,error_code=%s,result_run_id=%s,"
-                "finished_at=clock_timestamp(),phase=%s WHERE id=%s",
-                (state, code, run, state, request),
+                "finished_at=clock_timestamp(),phase=%s,result_partial=%s WHERE id=%s",
+                (state, code, run, state, bool(run and state == "failed"), request),
             )
             self.unresolved_calls(conn, request)
+            if durable:
+                system_event(
+                    conn,
+                    row,
+                    "execution_finished",
+                    "terminal",
+                    {
+                        "state": state,
+                        "code": code,
+                        "result_run_id": run,
+                        "candidate_count": len(result.candidates) if result else 0,
+                        "partial": bool(run and state == "failed"),
+                    },
+                )
 
     @staticmethod
     def unresolved_calls(conn: psycopg.Connection[Row], request: str) -> None:
@@ -449,6 +635,27 @@ class ExecutionState:
             "finished_at=clock_timestamp() WHERE request_id=%s AND outcome='entered'",
             (request,),
         )
+
+    def recover_diagnostics(self, owner: str, records: list[Row]) -> None:
+        with self.db.connect() as conn:
+            self.guard(conn, ready=False)
+            row = conn.execute(
+                "SELECT * FROM analysis_requests WHERE owner_token=%s FOR UPDATE", (owner,)
+            ).fetchone()
+            if (
+                row
+                and row.get("consent")
+                and row["consent"]["descriptor"]["profile"].get("durability_policy")
+                == DURABILITY_POLICY
+            ):
+                for record in records:
+                    system_event(
+                        conn,
+                        row,
+                        "finalization_failed",
+                        record.get("stage", "unknown"),
+                        {**record, "recovered_from_local_diagnostic": True},
+                    )
 
     def recover(self, *, code: str, require_owner: bool = True) -> None:
         # Called after fence AND old local execution quiescence, never as a timeout shortcut.
@@ -461,10 +668,55 @@ class ExecutionState:
             ) as (conn, current):
                 if current["state"] not in ACTIVE_ANALYSIS | {"checking"}:
                     continue
+                durable = bool(
+                    current.get("consent")
+                    and current["consent"]["descriptor"]["profile"].get("durability_policy")
+                    == DURABILITY_POLICY
+                )
+                if durable:
+                    system_event(
+                        conn,
+                        current,
+                        "execution_interrupted",
+                        "recovery",
+                        {
+                            "code": code,
+                            "condition": "owner_or_server_interrupted",
+                            "cause_status": "UNKNOWN",
+                        },
+                    )
+                run = None
+                if durable:
+                    try:
+                        recovered = fallback_result(conn, current, code)
+                        if recovered:
+                            snapshot, result = recovered
+                            profile = current["consent"]["descriptor"]["profile"]
+                            run = Experiences(self.db).insert(
+                                conn, snapshot, result, model=profile["model"], mode=profile["mode"]
+                            )
+                    except CollectionError as exc:
+                        system_event(
+                            conn,
+                            current,
+                            "finalization_failed",
+                            "recovery_partial",
+                            {
+                                "code": exc.code,
+                                "condition": "partial_not_materialized",
+                                "cause_status": "UNKNOWN",
+                            },
+                        )
                 conn.execute(
                     "UPDATE analysis_requests SET state=%s,error_code=%s,phase='interrupted',"
-                    "finished_at=clock_timestamp() WHERE id=%s",
-                    ("rejected" if current["accepted_at"] is None else "failed", code, row["id"]),
+                    "finished_at=clock_timestamp(),result_run_id=%s,result_partial=%s WHERE id=%s",
+                    (
+                        "rejected" if current["accepted_at"] is None else "failed",
+                        code,
+                        run,
+                        bool(run),
+                        row["id"],
+                    ),
                 )
                 self.unresolved_calls(conn, str(row["id"]))
         with self.db.connect() as conn:

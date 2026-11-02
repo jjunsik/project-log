@@ -1,16 +1,20 @@
-import {useEffect, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {collectionCaption, type Collection} from './model';
 import {Modal, date} from './ui';
 import AnalysisPreview from './AnalysisPreview';
+import AnalysisJournal from './AnalysisJournal';
 import {analysisExecutionReason} from './analysisSupport';
 import {analysisPrefix, completedAnalysisCollections, executionLabels, isActiveAnalysis, matchesPreparedScope} from './analysis';
 import type {AnalysisActions, AnalysisView, MaterialInfo} from './analysis';
 
-export default function AnalysisFlow({collections,materials,materialError,view,actions={},refreshMaterials}:{
-  collections:Collection[];materials?:MaterialInfo[];materialError?:string;view:AnalysisView;actions?:AnalysisActions;refreshMaterials:()=>void;
+export default function AnalysisFlow({projectId,collections,materials,materialError,view,actions={},refreshMaterials}:{
+  projectId?:string;collections:Collection[];materials?:MaterialInfo[];materialError?:string;view:AnalysisView;actions?:AnalysisActions;refreshMaterials:()=>void;
 }) {
   const ordered=completedAnalysisCollections(collections),[end,setEnd]=useState<string|null>(null);
   const [dialog,setDialog]=useState(false),[agreed,setAgreed]=useState(false),[previewReady,setPreviewReady]=useState(false);
+  const [journal,setJournal]=useState('');
+  const journalOpener=useRef<HTMLButtonElement|null>(null);
+  const closeJournal=()=>{setJournal('');journalOpener.current?.focus();};
   const preparation=view.preparation,prepared=preparation.data;
   const active=view.executions.find(e=>isActiveAnalysis(e.status));
   useEffect(()=>{if(prepared?.resume)setEnd(prepared.endCollectionId);},[prepared?.id,prepared?.endCollectionId,prepared?.resume?.requestId]);
@@ -88,7 +92,7 @@ export default function AnalysisFlow({collections,materials,materialError,view,a
           {active.status==='cancel_requested' && <p>새 AI 호출을 시작하지 않고 정리합니다. 실제 취소 완료까지 자료 변경 제한이 유지됩니다.</p>}
           <p className="hint">이미 외부로 전송된 요청의 즉시 중단이나 비용 회피는 보장하지 않습니다.</p>
         </div>}
-        <ul className="analysis-history">{view.executions.map(execution=><li key={execution.id}><span className={`badge analysis-status-${execution.status}`}>{executionLabels[execution.status]}</span><span>{date(execution.createdAt)} · {execution.endCollectionLabel}</span>{execution.message && <p>{execution.message}</p>}{execution.status==='failed' && (execution.checkpointCount??0)>0 && !execution.resumedByRequestId && !execution.resumeBlockReason && <button disabled={!canPrepare || view.executionAvailable===false} onClick={()=>{setEnd(execution.endCollectionId);actions.prepare?.(execution.endCollectionId,execution.id);}}>이어서 분석 준비</button>}{execution.diagnosticAvailable && <button disabled={!canPrepare || view.executionAvailable===false} onClick={()=>{setEnd(execution.endCollectionId);actions.prepare?.(execution.endCollectionId,execution.id,true);}}>1회 진단 준비</button>}{execution.diagnostic && <span className="badge">1회 진단 · 후속 분석 없음</span>}{execution.resumeBlockReason && <p className="notice">{analysisExecutionReason(execution.resumeBlockReason)}{execution.resumeAfter && <> 제공자 기준 갱신 시각: {date(execution.resumeAfter)}</>}</p>}{(execution.checkpointCount??0)>0 && <p className="hint">보존된 완료 중간 결과 {execution.checkpointCount}개 · 이번 실행 attempt {execution.calls??0}회 · 이전 누적 {execution.inheritedAttempts??0}회</p>}{execution.resumedByRequestId && <p className="hint">재개 실행이 접수됐습니다. 해당 실행의 상태를 확인하세요.</p>}{execution.resumeFromRequestId && <p className="hint">이전 실패에서 이어진 실행 · 중간 결과 {execution.reusedCheckpoints??0}개 재사용</p>}{['completed','failed','cancelled'].includes(execution.status) && <small className="hint">{active?'이 실행은 종료됐으며 이전 성공 결과는 보존됩니다. 현재 자료 제한은 진행 중인 실행 상태를 따릅니다.':'이 실행의 자료 변경 제한은 해제됐습니다. 이전 성공 결과는 보존됩니다.'}</small>}</li>)}</ul>
+        <ul className="analysis-history">{view.executions.map(execution=><li key={execution.id}><span className={`badge analysis-status-${execution.status}`}>{execution.partial?'부분 결과 · 미해결 있음':executionLabels[execution.status]}</span><span>{date(execution.createdAt)} · {execution.endCollectionLabel}</span>{execution.message && <p>{execution.message}</p>}{projectId&&execution.eventCount!==undefined&&<button aria-expanded={journal===execution.id} aria-controls={`analysis-journal-${execution.id}`} onClick={event=>{journalOpener.current=event.currentTarget;setJournal(current=>current===execution.id?'':execution.id);}}>실행 상세·부분 결과 보기{journal===execution.id&&<span aria-hidden="true"> · 열림</span>}</button>}{execution.status==='failed' && (execution.checkpointCount??0)>0 && !execution.resumedByRequestId && !execution.resumeBlockReason && <button disabled={!canPrepare || view.executionAvailable===false} onClick={()=>{setEnd(execution.endCollectionId);actions.prepare?.(execution.endCollectionId,execution.id);}}>이어서 분석 준비</button>}{execution.diagnosticAvailable && <button disabled={!canPrepare || view.executionAvailable===false} onClick={()=>{setEnd(execution.endCollectionId);actions.prepare?.(execution.endCollectionId,execution.id,true);}}>1회 진단 준비</button>}{execution.diagnostic && <span className="badge">1회 진단 · 후속 분석 없음</span>}{execution.resumeBlockReason && <p className="notice">{analysisExecutionReason(execution.resumeBlockReason)}{execution.resumeAfter && <> 제공자 기준 갱신 시각: {date(execution.resumeAfter)}</>}</p>}{(execution.checkpointCount??0)>0 && <p className="hint">보존된 완료 중간 결과 {execution.checkpointCount}개 · 이번 실행 attempt {execution.calls??0}회 · 이전 누적 {execution.inheritedAttempts??0}회</p>}{execution.resumedByRequestId && <p className="hint">재개 실행이 접수됐습니다. 해당 실행의 상태를 확인하세요.</p>}{execution.resumeFromRequestId && <p className="hint">이전 실패에서 이어진 실행 · 중간 결과 {execution.reusedCheckpoints??0}개 재사용</p>}{['completed','failed','cancelled'].includes(execution.status) && <small className="hint">{active?'이 실행은 종료됐으며 이전 성공 결과는 보존됩니다. 현재 자료 제한은 진행 중인 실행 상태를 따릅니다.':'이 실행의 자료 변경 제한은 해제됐습니다. 이전 성공 결과는 보존됩니다.'}</small>}{journal===execution.id&&projectId&&<AnalysisJournal key={journal} project={projectId} request={journal} execution={execution} count={execution.eventCount??0} close={closeJournal}/>}</li>)}</ul>
       </>}
       <details className="analysis-policy"><summary>진행·종료 정책</summary><ul>
         <li>전체 프로젝트에서 정상 접수된 대기·실행·취소 정리 중 분석은 최대 1건입니다. 다른 요청은 대기열에 넣지 않습니다.</li>
@@ -102,7 +106,7 @@ export default function AnalysisFlow({collections,materials,materialError,view,a
 
     {dialog && <Modal title="외부 AI 전송 안내" close={()=>setDialog(false)}>
       {prepared?.resume?.transition && <p className="notice">검증된 구→신 계약의 1회 전환입니다. 구 계약의 소진된 {prepared.resume.transition.previous_attempts}회는 그대로 남으며, 새 계약의 관계 요청에는 추가로 최대 {prepared.resume.transition.max_attempts}회가 허용됩니다. 통신 재시도와 조건부 재생성이 이 한도를 공유합니다. 과거 사용량·누적 이력은 초기화하지 않습니다. 이 전환 조건까지 확인하고 새로 동의하세요.</p>}
-      {prepared?.relationRecovery && <p className="notice">이번 동의에는 관계 근거 검증 실패 시 동일 고정 자료와 비민감 오류 코드·개수·검증 규칙을 추가 전송해 최대 {prepared.relationRecovery.maxRegenerations}회 재생성하는 조건이 포함됩니다. 통신 재시도와 공유하는 전송 진입 상한은 논리적 관계 요청당 {prepared.relationRecovery.maxAttempts}회입니다. 추가 호출도 사용량에 포함되며 잘못된 응답은 저장하지 않습니다.</p>}
+      {prepared?.relationRecovery && <p className="notice">이번 동의에는 관계 근거 검증 실패 시 동일 고정 자료와 비민감 오류 코드·개수·검증 규칙을 추가 전송해 최대 {prepared.relationRecovery.maxRegenerations}회 재생성하는 조건이 포함됩니다. 통신 재시도와 공유하는 전송 진입 상한은 논리적 관계 요청당 {prepared.relationRecovery.maxAttempts}회입니다. 추가 호출도 사용량에 포함됩니다. 잘못된 응답은 검증된 결과로 채택하지 않으며 진단 근거의 로컬 보존 여부는 준비한 정책을 확인하세요.</p>}
       <p>수집 자료는 선택한 종료점까지, 추가 자료는 정상 접수 당시 전체가 대상입니다. 실제 전송 입력과 제외·한계를 확인하세요.</p>
       <dl className="analysis-notice"><dt>제공자·모델</dt><dd>{prepared?`${prepared.provider} / ${prepared.model}`:'아직 확인되지 않았습니다.'}</dd><dt>실제 전송 범위</dt><dd>{prepared?.transferScope??'입력 준비 후 확인할 수 있습니다.'}</dd><dt>데이터 처리 정책</dt><dd className="preserve-lines">{prepared?.policy??'정책을 확인할 수 없어 동의와 분석 요청을 진행할 수 없습니다.'}</dd></dl>
       {!ready && <p className="notice">현재 유효한 준비 결과가 없습니다. 자료·제외 사유·모델·정책을 확인할 수 있어야 동의할 수 있습니다.</p>}

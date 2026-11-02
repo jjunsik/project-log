@@ -11,6 +11,7 @@ from multiprocessing.process import BaseProcess
 from uuid import uuid4
 
 import psycopg
+from pydantic import ValidationError
 
 from project_log.analysis_admission import AnalysisAdmission
 from project_log.analysis_child import (
@@ -21,6 +22,7 @@ from project_log.analysis_child import (
     run_child,
 )
 from project_log.analysis_diagnostic import configured_target, normalize
+from project_log.analysis_events import DURABILITY_POLICY, AnalysisFault, failure_details
 from project_log.analysis_execution import ExecutionState, execution_profile
 from project_log.db import Database, Row
 from project_log.experience_gemini import GEMINI_REQUEST_TIMEOUT_SECONDS
@@ -42,6 +44,7 @@ class Child:
     stop_at: float | None = None
     result_digest: str | None = None
     code: str | None = None
+    details: Row | None = None
     diagnostic: bool = False
 
 
@@ -101,9 +104,17 @@ class AnalysisWorker:
                     "analysis_worker_not_quiet", "이전 분석 실행의 종료를 확인할 수 없습니다."
                 )
             time.sleep(0.05)
+        for previous in owners:
+            owner = str(previous["owner_token"])
+            path = self.files.path(owner, ".failure.jsonl")
+            if path.exists():
+                raw = self.files.read(owner, 32 * 1024 * 1024, suffix=".failure.jsonl")
+                self.state.recover_diagnostics(
+                    owner, [json.loads(line) for line in raw.splitlines()]
+                )
         self.state.recover(code="failed_server_interrupted")
         for row in owners:
-            self.files.clean(str(row["owner_token"]))
+            self.files.clean(str(row["owner_token"]), retain_result=True)
         self.recovered = True
 
     def start(self) -> None:
@@ -234,6 +245,7 @@ class AnalysisWorker:
                         message.get("variant"),
                         message.get("feedback_code"),
                         message.get("logical_digest"),
+                        message.get("unit_request_digest"),
                     )
                     code = None
                 except CollectionError as exc:
@@ -272,6 +284,28 @@ class AnalysisWorker:
                 handle.pipe.send_bytes(
                     json.dumps({"event": event, "code": code, "budget": budget}).encode()
                 )
+            elif event == "journal":
+                assert self.profile is not None
+                raw = self.files.read(
+                    handle.owner, self.profile["result_max_bytes"], suffix=".event.json"
+                )
+                if sha256(raw) != message["digest"]:
+                    raise AnalysisFault(
+                        "analysis_event_digest_mismatch", "event_read", "digest_mismatch"
+                    )
+                payload = json.loads(raw)
+                if payload["event_seq"] != message["seq"]:
+                    raise AnalysisFault(
+                        "analysis_event_sequence_invalid", "event_read", "sequence_mismatch"
+                    )
+                try:
+                    self.state.journal(handle.project, handle.request, handle.owner, payload)
+                    code = None
+                except CollectionError as exc:
+                    code = exc.code
+                handle.pipe.send_bytes(
+                    json.dumps({"event": "journal", "seq": message["seq"], "code": code}).encode()
+                )
             elif event == "checkpoint":
                 assert self.profile is not None
                 raw = self.files.read(
@@ -308,6 +342,12 @@ class AnalysisWorker:
                 handle.result_digest = message["digest"]
             elif event == "error":
                 code = message["code"]
+                details = message.get("details")
+                handle.details = (
+                    details
+                    if isinstance(details, dict)
+                    else {"stage": "unknown", "condition": "unknown", "cause_status": "UNKNOWN"}
+                )
                 handle.code = (
                     code
                     if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,80}", code)
@@ -315,6 +355,11 @@ class AnalysisWorker:
                 )
             else:
                 raise CollectionError("analysis_control_invalid", "잘못된 분석 제어 메시지입니다.")
+
+    def preserve_failure(self, handle: Child, code: str, details: Row) -> None:
+        if self.profile and self.profile.get("durability_policy") == DURABILITY_POLICY:
+            self.files.failure(handle.owner, code, details)
+        self.state.diagnostic(handle.project, handle.request, handle.owner, code, details)
 
     def publish(self, handle: Child) -> None:
         assert self.profile is not None
@@ -327,10 +372,27 @@ class AnalysisWorker:
             snapshot = self.state.load(handle.project, handle.request, handle.owner)
             raw = self.files.read(handle.owner, self.profile["result_max_bytes"])
             if sha256(raw) != handle.result_digest:
-                raise CollectionError(
-                    "analysis_result_invalid", "결과 파일 무결성 확인에 실패했습니다."
+                raise AnalysisFault(
+                    "analysis_result_digest_mismatch",
+                    "result_read",
+                    "digest_mismatch",
+                    expected_digest=handle.result_digest,
+                    actual_digest=sha256(raw),
+                    measured_bytes=len(raw),
                 )
-            result = AnalysisResult.model_validate_json(raw)
+            try:
+                result = AnalysisResult.model_validate_json(raw)
+            except ValidationError as exc:
+                raise AnalysisFault(
+                    "analysis_result_schema_invalid",
+                    "result_schema",
+                    "schema_rejected",
+                    measured_bytes=len(raw),
+                    errors=[
+                        {"type": e["type"], "loc": [str(v) for v in e["loc"]]}
+                        for e in exc.errors(include_input=False, include_url=False)
+                    ],
+                ) from None
         elif code is None:
             cancelled_exit = handle.stop_at is not None and handle.process.exitcode in {-15, -9, 77}
             code = (
@@ -338,6 +400,8 @@ class AnalysisWorker:
                 if current["state"] == "cancel_requested" and cancelled_exit
                 else "analysis_child_failed"
             )
+        if code and handle.details:
+            self.preserve_failure(handle, code, handle.details)
         # Retry only transactions known to have rolled back. A commit-response error
         # is resolved by re-querying this request on the next supervisor iteration.
         for attempt in range(2):
@@ -349,11 +413,43 @@ class AnalysisWorker:
                     code=code,
                     snapshot=snapshot,
                     result=result,
+                    recover_partial=code is not None,
                 )
                 return
-            except (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure):
+            except (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure) as exc:
+                self.preserve_failure(
+                    handle,
+                    "analysis_result_transaction_retry",
+                    {
+                        "stage": "result_transaction",
+                        "condition": "known_rollback",
+                        "cause_status": "CONFIRMED",
+                        "sqlstate": exc.sqlstate,
+                        "attempt": attempt + 1,
+                        "max_attempts": 2,
+                    },
+                )
                 if attempt:
                     raise
+            except psycopg.OperationalError:
+                self.preserve_failure(
+                    handle,
+                    "analysis_result_commit_unknown",
+                    {
+                        "stage": "result_commit",
+                        "condition": "commit_response_not_confirmed",
+                        "cause_status": "UNKNOWN",
+                    },
+                )
+                observed = self.db.one(
+                    "SELECT state FROM analysis_requests WHERE id=%s", (handle.request,)
+                )
+                if observed["state"] in {"completed", "failed", "cancelled"}:
+                    self.state.commit_resolved(
+                        handle.project, handle.request, handle.owner, observed["state"]
+                    )
+                    return
+                raise
 
     def once(self) -> bool:
         self.ownership.check()
@@ -389,8 +485,37 @@ class AnalysisWorker:
             try:
                 self.publish(handle)
             except CollectionError as exc:
-                self.state.finish(handle.project, handle.request, handle.owner, code=exc.code)
-            self.files.clean(handle.owner)
+                handle.code, handle.details = exc.code, failure_details(exc, "result_publish")
+                self.preserve_failure(handle, exc.code, handle.details)
+                try:
+                    self.state.finish(
+                        handle.project,
+                        handle.request,
+                        handle.owner,
+                        code=exc.code,
+                        recover_partial=True,
+                    )
+                except CollectionError as partial_exc:
+                    # A persistent result-store error must not lock the Project or
+                    # erase certified events. End the request without another insert.
+                    self.preserve_failure(
+                        handle,
+                        partial_exc.code,
+                        {
+                            **failure_details(partial_exc, "partial_result_persist"),
+                            "operation": "partial_result_persist",
+                            "primary_code": exc.code,
+                        },
+                    )
+                    self.state.finish(handle.project, handle.request, handle.owner, code=exc.code)
+            self.files.clean(
+                handle.owner,
+                retain_result=bool(
+                    handle.details
+                    and self.profile
+                    and self.profile.get("durability_policy") == DURABILITY_POLICY
+                ),
+            )
             handle.pipe.close()
             self.child = None
             return True
@@ -432,7 +557,9 @@ class AnalysisWorker:
             if exc.code != "analysis_owner_lost":
                 raise
         if self.child:
-            self.files.clean(self.child.owner)
+            self.files.clean(
+                self.child.owner, retain_result=bool(self.poisoned or self.child.details)
+            )
             self.child.pipe.close()
             self.child = None
 

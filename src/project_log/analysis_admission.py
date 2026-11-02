@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StringConstraints
 
 from project_log.analysis_checkpoints import (
     DISCOVERY_COMPATIBILITY,
+    PLANNING_COMPATIBILITY,
     RELATION_FIX_COMPATIBILITY,
     RELATION_RECOVERY_COMPATIBILITY,
     REQUEST_COMPATIBILITY,
@@ -38,6 +39,7 @@ from project_log.analysis_sources import source_version
 from project_log.analysis_transfer import TRANSFER_POLICY
 from project_log.db import Database, Row
 from project_log.experience_input import ExperienceInput, ExperienceInputs
+from project_log.experience_planning import PLANNING_POLICY
 from project_log.experience_relations import (
     CORE_SEEDS,
     EXCERPT_CHARS,
@@ -52,8 +54,8 @@ from project_log.experiences import (
     RESPONSE_SCHEMAS,
     TASK_INSTRUCTIONS,
     Limits,
-    batches,
     discovery_schema,
+    plan_discovery,
     split_evidence,
 )
 from project_log.gemini_request import provider_schema, request_policy
@@ -64,7 +66,7 @@ from project_log.policy import sha256
 Digest = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
 REQUEST_FIELDS = (
     "id,project_id,preparation_id,generation,created_at,state,accepted_at,finished_at,"
-    "input_digest,error_code,result_run_id,started_at,cancel_requested_at,phase,call_seq,"
+    "input_digest,error_code,result_run_id,result_partial,started_at,cancel_requested_at,phase,call_seq,"
     "resume_from_request_id,inherited_attempts"
 )
 
@@ -362,8 +364,38 @@ class AnalysisAdmission:
         snapshot = decode_snapshot(
             original["input_payload"], original["input_manifest"], original["input_digest"]
         )
+        # Provenance is independent of JSON hashes: a response must originate in
+        # this Project's completed, clean provider call and retain its chronology.
+        for checkpoint in checkpoints:
+            origin = conn.execute(
+                "SELECT * FROM analysis_calls WHERE request_id=%s AND seq=%s AND project_id=%s",
+                (checkpoint["origin_request_id"], checkpoint["origin_call_seq"], project),
+            ).fetchone()
+            if (
+                not origin
+                or origin["phase"] != checkpoint["task"]
+                or origin["outcome"] != "responded"
+                or origin["error_code"] is not None
+                or (
+                    origin["unit_request_digest"] is not None
+                    and origin["unit_request_digest"] != checkpoint["request_digest"]
+                )
+            ):
+                raise CollectionError(
+                    "analysis_checkpoint_invalid", "중간 결과 출처가 유효하지 않습니다."
+                )
+            checkpoint["_origin_unit_digest"] = origin["unit_request_digest"]
+        old_profile = original["consent"]["descriptor"]["profile"]
+        proof_events = None
+        if compatibility_policy(old_profile, self.profile) == PLANNING_COMPATIBILITY:
+            proof_events = conn.execute(
+                "SELECT event_seq,kind,phase,unit_digest,data FROM analysis_events "
+                "WHERE request_id=%s AND kind IN ('unit_started','unit_reused','unit_validated') "
+                "ORDER BY event_seq",
+                (request,),
+            ).fetchall()
         checkpoints = resume_rows(
-            checkpoints, snapshot, original["consent"]["descriptor"]["profile"], self.profile
+            checkpoints, snapshot, old_profile, self.profile, proof_events=proof_events
         )
         return original, prepared, checkpoints
 
@@ -458,6 +490,34 @@ class AnalysisAdmission:
             "request_contract": request_policy(),
             "relation_recovery": self.profile.get("relation_recovery"),
             "relation_recovery_digest": self._recovery_digest(),
+            **(
+                {"planning_policy": self.profile["planning_policy"]}
+                if self.profile.get("planning_policy")
+                else {}
+            ),
+            **(
+                {"durability_policy": self.profile["durability_policy"]}
+                if self.profile.get("durability_policy")
+                else {}
+            ),
+            **(
+                {"failure_policy": self.profile["failure_policy"]}
+                if self.profile.get("failure_policy")
+                else {}
+            ),
+            **(
+                {
+                    "discovery_plan": [
+                        {"origin_ordinal": origin, "chunk_ids": [c.id for c in part]}
+                        for part, origin in zip(
+                            *plan_discovery(chunks, Limits(**self.profile["limits"]), True),
+                            strict=True,
+                        )
+                    ]
+                }
+                if self.profile.get("planning_policy") == PLANNING_POLICY
+                else {}
+            ),
             "task_instructions": TASK_INSTRUCTIONS,
             "response_schemas": {
                 task: (
@@ -470,7 +530,11 @@ class AnalysisAdmission:
                             ),
                         }
                         for index, batch in enumerate(
-                            batches(chunks, Limits(**self.profile["limits"]))
+                            plan_discovery(
+                                chunks,
+                                Limits(**self.profile["limits"]),
+                                self.profile.get("planning_policy") == PLANNING_POLICY,
+                            )[0]
                         )
                     ]
                     if task == "discover"

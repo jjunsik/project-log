@@ -279,7 +279,9 @@ def test_isolated_sdk_three_manual_days_preserve_results_and_exceed_512_lineage(
                 assert (
                     done["state"] == "failed" and done["error_code"] == "gemini_free_daily_limit"
                 ), done
-                assert not Experiences(db).listing(pid)
+                partial = Experiences(db).detail(pid, str(done["result_run_id"]))["result"]
+                assert partial["coverage"]["analysis_status"] == "partial"
+                assert partial["coverage"]["stop_code"] == "gemini_free_daily_limit"
                 db.execute(
                     "UPDATE analysis_requests SET finished_at=%s WHERE id=%s",
                     (Date.now(PACIFIC), rid),
@@ -289,7 +291,7 @@ def test_isolated_sdk_three_manual_days_preserve_results_and_exceed_512_lineage(
                     == "analysis_resume_daily_wait"
                 )
             else:
-                assert done["state"] == "completed" and len(Experiences(db).listing(pid)) == 1, done
+                assert done["state"] == "completed" and len(Experiences(db).listing(pid)) == 3, done
             history.append(original(db, rid))
             assert len(rows) == [1, 3, 4][day]
             assert done["call_seq"] == [1, 2, 1][day]
@@ -350,14 +352,15 @@ def test_semantic_failure_is_not_treated_as_tomorrows_quota(db, tmp_path):
         failed = terminal(worker, pid, rid)
         before = original(db, rid)
         prep = prepare_resume(worker, pid, cid, rid)
-        assert prep["error_code"] == "analysis_resume_validation_required"
+        assert failed["error_code"] == "analysis_partial"
+        assert prep["state"] == "ready"
         assert original(db, rid) == before
         with db.connect() as conn:
             assert (
                 resume_block(
                     conn, before, worker.profile, now=failed["finished_at"] + timedelta(days=1)
                 )
-                == "analysis_resume_validation_required"
+                is None
             )
     finally:
         stop(worker, owner)

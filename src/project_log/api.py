@@ -1,10 +1,14 @@
+import json
+import logging
 import os
+import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote_to_bytes
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -190,11 +194,31 @@ def create_app(
         return JSONResponse({"code": exc.code, "detail": exc.message}, status_code=status)
 
     @app.exception_handler(psycopg.Error)
-    async def database_error(_request: Request, _exc: psycopg.Error) -> JSONResponse:
+    async def database_error(request: Request, exc: psycopg.Error) -> JSONResponse:
+        diagnostic_id = str(uuid4())
+        sqlstate = exc.sqlstate or "UNKNOWN"
+        if not re.fullmatch(r"[A-Z0-9]{5}", sqlstate):
+            sqlstate = "UNKNOWN"
+        started = getattr(request.state, "analysis_read_started", None)
+        diagnostic = {
+            "event": "database_unavailable",
+            "diagnostic_id": diagnostic_id,
+            "route": getattr(request.scope.get("route"), "path", "UNKNOWN"),
+            "stage": getattr(request.state, "analysis_read_stage", "UNKNOWN"),
+            "sqlstate": sqlstate,
+            "exception_type": type(exc).__name__,
+            "cause_status": "UNKNOWN",
+            "observed_at_unix": time.time(),
+            "elapsed_ms": round((time.monotonic() - started) * 1000) if started else None,
+        }
+        # No exception text/traceback, SQL, params, URL query, headers or source bodies.
+        logging.getLogger(__name__).error("%s", json.dumps(diagnostic, sort_keys=True))
         return JSONResponse(
             {
                 "code": "database_unavailable",
-                "detail": "DB 작업에 실패했습니다. 로컬 DB 상태를 확인하세요.",
+                "detail": "DB 작업에 실패했습니다. 로컬 DB 상태를 확인하세요. "
+                f"진단 ID: {diagnostic_id}",
+                "diagnostic_id": diagnostic_id,
             },
             status_code=503,
         )

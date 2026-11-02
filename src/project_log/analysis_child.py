@@ -14,8 +14,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 
-from project_log.analysis_checkpoints import ResponseJournal, read_rows, validate_rows
+from project_log.analysis_checkpoints import (
+    ResponseJournal,
+    UnitResponseJournal,
+    read_rows,
+    validate_rows,
+)
 from project_log.analysis_diagnostic import configured_target, validate_execution
+from project_log.analysis_events import DURABILITY_POLICY, AnalysisFault, failure_details
 from project_log.analysis_execution import execution_profile
 from project_log.analysis_input import canonical
 from project_log.analysis_snapshot import decode_snapshot
@@ -24,6 +30,7 @@ from project_log.experience_gemini import (
     GeminiExperienceModel,
     TransientProviderError,
 )
+from project_log.experience_planning import PLANNING_POLICY
 from project_log.experience_relations import (
     Reconciliation,
     feedback_context,
@@ -32,7 +39,7 @@ from project_log.experience_relations import (
     relation_work_digest,
     validate_review,
 )
-from project_log.experiences import Chunk, ExperienceGraph, ExperienceModel, Limits
+from project_log.experiences import FAILURE_POLICY, Chunk, ExperienceGraph, ExperienceModel, Limits
 from project_log.gemini import GeminiConfig
 from project_log.gemini_free_tier import MinuteProviderError
 from project_log.gemini_free_tier import from_environment as free_tier_quota
@@ -111,7 +118,16 @@ class ExecutionFiles:
     def read(self, owner: str, maximum: int, *, suffix: str = ".json") -> bytes:
         self.materials._directory(self.materials.root)
         self.materials._directory(self.root)
-        fd = os.open(self.path(owner, suffix), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            fd = os.open(self.path(owner, suffix), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            raise AnalysisFault(
+                "analysis_result_file_missing", "result_read", "file_missing"
+            ) from None
+        except OSError as exc:
+            raise AnalysisFault(
+                "analysis_result_file_unavailable", "result_read", "open_failed", errno=exc.errno
+            ) from None
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
             if (
@@ -119,21 +135,62 @@ class ExecutionFiles:
                 or info.st_size > maximum
                 or info.st_uid != os.getuid()
             ):
-                raise CollectionError(
-                    "analysis_result_invalid", "분석 결과 파일을 확인할 수 없습니다."
+                raise AnalysisFault(
+                    "analysis_result_file_invalid",
+                    "result_read",
+                    "file_identity_or_size",
+                    measured_bytes=info.st_size,
+                    limit_bytes=maximum,
+                    regular=stat.S_ISREG(info.st_mode),
+                    owner_matches=info.st_uid == os.getuid(),
                 )
             raw = stream.read(maximum + 1)
         if len(raw) > maximum:
-            raise CollectionError("analysis_result_invalid", "분석 결과 크기 제한을 초과했습니다.")
+            raise AnalysisFault(
+                "analysis_result_file_too_large",
+                "result_read",
+                "bytes_gt_limit",
+                measured_bytes=len(raw),
+                limit_bytes=maximum,
+            )
         return raw
 
-    def clean(self, owner: str) -> None:
+    def failure(self, owner: str, code: str, details: Row) -> None:
+        """Local fsync backstop before a DB diagnostic transaction; never raw exceptions."""
+        self.materials._directory(self.root)
+        raw = canonical({"code": code, **details}).encode() + b"\n"
+        if len(raw) > CONTROL_BYTES:
+            raw = (
+                canonical(
+                    {
+                        "code": code,
+                        "stage": "unknown",
+                        "condition": "diagnostic_too_large",
+                        "cause_status": "UNKNOWN",
+                        "measured_bytes": len(raw),
+                    }
+                ).encode()
+                + b"\n"
+            )
+        fd = os.open(
+            self.path(owner, ".failure.jsonl"),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+            0o600,
+        )
+        with os.fdopen(fd, "ab") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def clean(self, owner: str, *, retain_result: bool = False) -> None:
         # Only known files, after join/quiescence and terminal commit. Never recursive.
         if not self.root.exists() and not self.root.is_symlink():
             return
         self.materials._directory(self.materials.root)
         self.materials._directory(self.root)
         for suffix in (".json", ".checkpoint.json", ".lock"):
+            if retain_result and suffix != ".lock":
+                continue
             self.path(owner, suffix).unlink(missing_ok=True)
 
 
@@ -143,10 +200,17 @@ class Control:
         self.grants: queue.Queue[Row] = queue.Queue(maxsize=1)
         self.seq, self.phase = 0, "starting"
         self.entered_seq = 0
+        self.event_seq = 0
+        self.durable = False
+        self.files: ExecutionFiles | None = None
+        self.owner: str | None = None
+        self.event_max_bytes = 32 * 1024 * 1024
+        self.last_error_code: str | None = None
         self.first_digest: str | None = None
         self.relation_variant: str | None = None
         self.relation_feedback: str | None = None
         self.relation_digest: str | None = None
+        self.unit_request_digest: str | None = None
         threading.Thread(target=self.listen, daemon=True).start()
 
     def listen(self) -> None:
@@ -196,6 +260,7 @@ class Control:
         self.seq += 1
         self.send(
             event="call",
+            unit_request_digest=self.unit_request_digest,
             seq=self.seq,
             phase=self.phase,
             digest=digest,
@@ -239,6 +304,15 @@ class Control:
 
     def retry_wait(self, delay: float) -> None:
         # Finish/phase commits precede this ACK; the cooldown starts afterwards.
+        self.record(
+            "attempt_retry_scheduled",
+            self.phase,
+            self.unit_request_digest,
+            seq=self.seq,
+            code=self.last_error_code,
+            delay_seconds=delay,
+            reason="reviewed_transport_retry_within_shared_budget",
+        )
         self.send(event="phase", phase="retry_wait", seq=self.seq)
         while True:
             self.check()
@@ -251,6 +325,54 @@ class Control:
             break
         if self.stopped.wait(delay):
             self.check()
+
+    def record(self, kind: str, phase: str, unit: str | None = None, **data: Any) -> None:
+        if not self.durable:
+            return
+        assert self.files is not None and self.owner is not None
+        self.check()
+        payload = {
+            "event_seq": self.event_seq + 1,
+            "kind": kind,
+            "phase": phase,
+            "unit_digest": unit,
+            "data": data,
+        }
+        raw = canonical(payload).encode()
+        if len(raw) > self.event_max_bytes:
+            raise AnalysisFault(
+                "analysis_event_too_large",
+                "event_write",
+                "serialized_bytes_gt_limit",
+                event_kind=kind,
+                measured_bytes=len(raw),
+                limit_bytes=self.event_max_bytes,
+            )
+        path = self.files.path(self.owner, ".event.json")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.event_seq += 1
+        self.send(event="journal", seq=self.event_seq, digest=sha256(raw))
+        while True:
+            self.check()
+            try:
+                response = self.grants.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if response.get("event") != "journal" or response.get("seq") != self.event_seq:
+                raise AnalysisFault("analysis_event_ack_invalid", "event_commit", "ack_mismatch")
+            if response.get("code"):
+                raise AnalysisFault(
+                    "analysis_event_persist_failed",
+                    "event_commit",
+                    "commit_not_confirmed",
+                    storage_code=response["code"],
+                )
+            path.unlink()
+            return
 
     def checkpoint(self, files: ExecutionFiles, owner: str, maximum: int, payload: Row) -> None:
         self.check()
@@ -301,6 +423,12 @@ class ControlledModel:
     ):
         self.model, self.control, self.profile = model, control, profile
         self.diagnostic = diagnostic
+        self.attempts: dict[str, int] = {}
+
+    def _event(self, kind: str, **data: Any) -> None:
+        record = getattr(self.control, "record", None)
+        if record:
+            record(kind, self.control.phase, self.control.unit_request_digest, **data)
 
     def complete(
         self,
@@ -311,6 +439,17 @@ class ControlledModel:
         schema: type[BaseModel],
     ) -> BaseModel:
         self.control.phase, self.control.first_digest = task, None
+        self.control.unit_request_digest = sha256(
+            canonical(
+                {
+                    "task": task,
+                    "instruction": instruction,
+                    "chunks": [c.payload() for c in chunks],
+                    "context": json.loads(context),
+                    "schema": schema.model_json_schema(),
+                }
+            ).encode()
+        )
         if (
             task == "reconcile"
             and not self.diagnostic
@@ -331,6 +470,13 @@ class ControlledModel:
             ).encode()
         )
         attempts = 1 if self.diagnostic else self.profile["attempts_per_call"]
+        bounded = self.profile.get("failure_policy") == FAILURE_POLICY
+        if bounded:
+            attempts -= self.attempts.get(digest, 0)
+            if attempts <= 0:
+                raise CollectionError(
+                    "unit_attempts_exhausted", "이 항목의 호출 한도가 소진됐습니다."
+                )
         for attempt in range(attempts):
             self.control.check()
             previous_seq = self.control.seq
@@ -339,6 +485,8 @@ class ControlledModel:
                 # An injected offline model uses this equivalent attempt boundary.
                 if not isinstance(self.model, GeminiExperienceModel):
                     self.control.enter(digest)
+                if bounded:
+                    self.attempts[digest] = self.attempts.get(digest, 0) + 1
                 result = self.model.complete(task, instruction, chunks, context, schema)
                 self.control.send(event="attempt_finished", seq=self.control.seq, code=None)
                 self.control.check()
@@ -364,6 +512,7 @@ class ControlledModel:
                 )
                 if delay > self.profile["minute_retry_max_delay"]:
                     raise
+                self.control.last_error_code = exc.code
                 self.control.retry_wait(delay)
             except CollectionError as exc:
                 if exc.code == "analysis_diagnostic_response_received":
@@ -423,6 +572,15 @@ class ControlledModel:
                 try:
                     output = schema.model_validate(result.model_dump())
                 except ValidationError:
+                    self._event(
+                        "unit_failed",
+                        seq=self.control.seq,
+                        code="candidate_relation_schema_invalid",
+                        condition="relation_schema",
+                        cause_status="CONFIRMED",
+                        response=result.model_dump(),
+                        context=original,
+                    )
                     raise CollectionError(
                         "candidate_relation_schema_invalid", "관계 응답 구조가 유효하지 않습니다."
                     ) from None
@@ -430,11 +588,29 @@ class ControlledModel:
                     assert isinstance(output, Reconciliation)
                     validate_review(output, original)
                 except CollectionError as exc:
+                    self._event(
+                        "unit_failed",
+                        seq=self.control.seq,
+                        code=exc.code,
+                        condition="relation_grounding",
+                        cause_status="CONFIRMED",
+                        response=output.model_dump(),
+                        context=original,
+                        variant=self.control.relation_variant,
+                    )
                     if grounding_feedback(exc.code) is None:
                         raise
                     self.control.relation(exc.code)  # Durable ACK before any new send.
                     if budget["used"] + 1 >= 2:
                         raise
+                    self._event(
+                        "attempt_retry_scheduled",
+                        seq=self.control.seq,
+                        code=exc.code,
+                        reason="reviewed_grounding_regeneration_within_shared_budget",
+                        next_variant="feedback",
+                        delay_seconds=0,
+                    )
                     continue
                 return output
             except (TransientProviderError, MinuteProviderError) as exc:
@@ -448,11 +624,33 @@ class ControlledModel:
                 )
                 if delay > self.profile["minute_retry_max_delay"]:
                     raise
+                self.control.last_error_code = exc.code
                 self.control.retry_wait(delay)
             except CollectionError as exc:
                 if self.control.seq > previous_seq and self.control.entered_seq == self.control.seq:
                     self.control.send(event="attempt_finished", seq=self.control.seq, code=exc.code)
                 raise
+
+
+def serialize_result(result: BaseModel, maximum: int) -> bytes:
+    try:
+        raw = result.model_dump_json().encode()
+    except Exception as exc:
+        raise AnalysisFault(
+            "analysis_result_serialize_failed",
+            "result_serialize",
+            "unknown",
+            exception_type=type(exc).__name__,
+        ) from None
+    if len(raw) > maximum:
+        raise AnalysisFault(
+            "analysis_result_too_large",
+            "result_size",
+            "serialized_bytes_gt_limit",
+            measured_bytes=len(raw),
+            limit_bytes=maximum,
+        )
+    return raw
 
 
 def run_child(
@@ -470,6 +668,7 @@ def run_child(
     control = Control(pipe)
     files = ExecutionFiles(Materials(Database(dsn), Path(storage_root)))
     fd = -1
+    stage = "child_start"
     try:
         fd = files.lock(owner, create=True)
         info = os.fstat(fd)
@@ -517,6 +716,9 @@ def run_child(
                 "minute_retry_max_delay",
                 "no_progress_resume_limit",
                 "relation_recovery",
+                "failure_policy",
+                "durability_policy",
+                "planning_policy",
             )
         ):
             raise CollectionError("analysis_policy_changed", "분석 실행 계약이 변경됐습니다.")
@@ -526,19 +728,59 @@ def run_child(
             raise CollectionError(
                 "analysis_diagnostic_unavailable", "진단 운영 설정이 변경됐습니다."
             )
+        control.durable = profile.get("durability_policy") == DURABILITY_POLICY and not diagnostic
+        control.files, control.owner, control.event_max_bytes = (
+            files,
+            owner,
+            profile["result_max_bytes"],
+        )
+        stage = "checkpoint_replay"
         checkpoints = read_rows(Database(dsn), project, request)
         validate_rows(checkpoints, snapshot.digest, profile)
+        with Database(dsn).connect() as conn:
+            for checkpoint in checkpoints:
+                origin = conn.execute(
+                    "SELECT * FROM analysis_calls WHERE request_id=%s AND seq=%s AND project_id=%s",
+                    (checkpoint["origin_request_id"], checkpoint["origin_call_seq"], project),
+                ).fetchone()
+                if (
+                    not origin
+                    or origin["phase"] != checkpoint["task"]
+                    or origin["outcome"] != "responded"
+                    or origin["error_code"] is not None
+                    or (
+                        origin["unit_request_digest"] is not None
+                        and origin["unit_request_digest"] != checkpoint["request_digest"]
+                    )
+                ):
+                    raise CollectionError(
+                        "analysis_checkpoint_invalid", "중간 결과 호출 출처 불일치입니다."
+                    )
         control.check()
         model = (
             factory(profile, control.enter)
             if factory
             else gemini_model(profile, control.enter, stopped=control.stopped)
         )
+        if isinstance(model, GeminiExperienceModel) and control.durable:
+            model.validation_failure = lambda data: control.record(
+                "provider_validation_failed", control.phase, control.unit_request_digest, **data
+            )
+        stage = "graph"
         result = ExperienceGraph(
             ControlledModel(model, control, profile, diagnostic),
             Limits(**profile["limits"]),
+            plan_requests=profile.get("planning_policy") == PLANNING_POLICY and not diagnostic,
+            events=(lambda kind, phase, unit, data: control.record(kind, phase, unit, **data))
+            if control.durable
+            else None,
             stopped=control.stopped.is_set,
-            checkpoints=ResponseJournal(
+            isolate_failures=profile.get("failure_policy") == FAILURE_POLICY and not diagnostic,
+            checkpoints=(
+                UnitResponseJournal
+                if profile.get("failure_policy") == FAILURE_POLICY and not diagnostic
+                else ResponseJournal
+            )(
                 checkpoints,
                 lambda index, task, digest, response: control.checkpoint(
                     files,
@@ -555,9 +797,10 @@ def run_child(
             remaining_attempts=lambda: profile["limits"]["max_calls"] - control.seq,
         ).run(snapshot)
         control.check()
-        raw = result.model_dump_json().encode()
-        if len(raw) > profile["result_max_bytes"]:
-            raise CollectionError("analysis_result_invalid", "분석 결과 크기 제한을 초과했습니다.")
+        stage = "result_serialize"
+        control.record("finalization_started", stage, candidate_count=len(result.candidates))
+        raw = serialize_result(result, profile["result_max_bytes"])
+        stage = "result_write"
         with files.path(owner, ".json").open("xb") as stream:
             os.chmod(stream.name, 0o600)
             stream.write(raw)
@@ -568,7 +811,14 @@ def run_child(
         try:
             control.send(
                 event="error",
-                code=exc.code if isinstance(exc, CollectionError) else "analysis_execution_failed",
+                code=exc.code
+                if isinstance(exc, CollectionError)
+                else (
+                    "analysis_result_write_failed"
+                    if stage == "result_write"
+                    else "analysis_execution_failed"
+                ),
+                details=failure_details(exc, stage),
             )
         except (OSError, ValueError):
             pass

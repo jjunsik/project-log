@@ -47,6 +47,9 @@ def legacy_profile(current):
     # Neither contract existed in the pinned historical metadata below.
     old.pop("request_contract", None)
     old.pop("relation_recovery", None)
+    old.pop("failure_policy", None)
+    old.pop("durability_policy", None)
+    old.pop("planning_policy", None)
     return old
 
 
@@ -394,7 +397,14 @@ def test_later_failure_reuses_global_review_checkpoint_and_counts_failed_sdk_cal
     exercise_264_checkpoint_chain(db, tmp_path, monkeypatch, later_failure=True)
 
 
-def test_schema012_013_upgrade_preserves_schema011_histories_checkpoints_and_ledger(tmp_path):
+def test_schema012_013_upgrade_preserves_schema011_histories_checkpoints_and_ledger(
+    tmp_path, monkeypatch
+):
+    import project_log.analysis_admission as admission
+
+    monkeypatch.setattr(
+        admission, "REQUEST_FIELDS", admission.REQUEST_FIELDS.replace(",result_partial", "")
+    )
     with temporary_database() as dsn:
         db = Database(dsn)
         with db.connect() as conn:
@@ -442,10 +452,15 @@ def test_schema012_013_upgrade_preserves_schema011_histories_checkpoints_and_led
                 after = db.all(f"SELECT * FROM {table} ORDER BY 1,2")
                 if table == "schema_migrations":
                     assert after[:11] == before[table]
-                    assert len(after) == 13
+                    assert len(after) == 15
                 elif table == "analysis_calls":
                     for row in after:
                         assert row.pop("logical_digest") is None
+                        assert row.pop("unit_request_digest") is None
+                    assert after == before[table]
+                elif table == "analysis_requests":
+                    for row in after:
+                        assert row.pop("result_partial") is False
                     assert after == before[table]
                 else:
                     assert after == before[table]

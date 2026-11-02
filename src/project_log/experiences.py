@@ -6,7 +6,7 @@ The caller supplies the model; production transfer remains a separate consent bo
 
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from project_log.analysis_input import canonical
 from project_log.analysis_transfer import SOURCE_KEYS
 from project_log.experience_input import EXPERIENCE_INPUT_POLICY, Evidence, ExperienceInput, Media
+from project_log.experience_planning import subdivide
 from project_log.experience_relations import (
     EXCERPT_CHARS,
     RELATION_CONTEXT_CHARS,
@@ -30,9 +31,11 @@ from project_log.experience_relations import (
     validate_review,
     windows,
 )
-from project_log.gemini_request import validate_plan
+from project_log.gemini_request import RequestLimit, validate_plan
 from project_log.git import CollectionError
 from project_log.policy import sha256
+
+FAILURE_POLICY = "isolated-units-deferred-recovery-v1"
 
 ANALYSIS_POLICY = "experience-graph-v5-user-reviewed-batch-references"
 CONSOLIDATION_POLICY = "explicit-seed-assignments-v3-global-reviewed-relations"
@@ -386,6 +389,107 @@ def batches(chunks: Sequence[Chunk], limits: Limits) -> list[tuple[Chunk, ...]]:
     return result
 
 
+def fragment_chunk(chunk: Chunk, start: int, end: int) -> Chunk:
+    if chunk.media or chunk.text is None or not 0 <= start < end <= len(chunk.text):
+        raise CollectionError("analysis_input_corrupt", "분할 근거 범위가 유효하지 않습니다.")
+    parent, marker, bounds = chunk.id.rpartition("/slice/")
+    origin = int(bounds.split(":")[0]) if marker else 0
+    parent = parent if marker else chunk.id
+    return replace(
+        chunk,
+        id=f"{parent}/slice/{origin + start}:{origin + end}",
+        text=chunk.text[start:end],
+        offset=chunk.offset + start,
+    )
+
+
+def resolve_chunks(chunks: Sequence[Chunk], identifiers: Sequence[str]) -> tuple[Chunk, ...]:
+    """Resolve deterministic slices from the immutable original chunk, not AI text."""
+    lookup = {c.id: c for c in chunks}
+    result = []
+    for identifier in dict.fromkeys(identifiers):
+        if identifier in lookup:
+            result.append(lookup[identifier])
+            continue
+        try:
+            parent, marker, bounds = identifier.rpartition("/slice/")
+            start, end = (int(v) for v in bounds.split(":"))
+            if not marker or parent not in lookup:
+                raise ValueError
+            item = fragment_chunk(lookup[parent], start, end)
+            if item.id != identifier:
+                raise ValueError
+            result.append(item)
+        except (ValueError, KeyError):
+            raise CollectionError(
+                "analysis_input_corrupt", "보존 근거의 분할 위치가 일치하지 않습니다."
+            ) from None
+    return tuple(result)
+
+
+def request_fits(
+    task: str, chunks: Sequence[Chunk], context: object, schema: type[BaseModel], limits: Limits
+) -> bool:
+    try:
+        measured = len(canonical([c.payload() for c in chunks])) + len(canonical(context))
+        maximum = RELATION_CONTEXT_CHARS if task == "reconcile" else 2 * limits.batch_chars
+        if measured > maximum:
+            raise RequestLimit("context_chars", measured, maximum)
+        validate_plan(
+            task,
+            BASE_INSTRUCTION + " " + TASK_INSTRUCTIONS[task],
+            [c.payload() for c in chunks],
+            context,
+            schema.model_json_schema(),
+        )
+    except RequestLimit:
+        return False
+    return True
+
+
+def planned_chunks(
+    work: Sequence[Sequence[Chunk]], fits: Callable[[Sequence[Chunk]], bool]
+) -> list[tuple[Chunk, ...]]:
+    def split(chunk: Chunk) -> Sequence[Chunk]:
+        if chunk.text is None or len(chunk.text) < 2 or chunk.media:
+            return [chunk]
+        # If the immutable source/context overhead cannot fit even one code
+        # point, text subdivision cannot repair it. Retain one explicit failure.
+        if not fits((fragment_chunk(chunk, len(chunk.text) - 1, len(chunk.text)),)):
+            return [chunk]
+        middle = len(chunk.text) // 2
+        overlap = min(512, len(chunk.text) // 8)
+        return [
+            fragment_chunk(chunk, 0, middle + overlap),
+            fragment_chunk(chunk, middle - overlap, len(chunk.text)),
+        ]
+
+    planned = [part for batch in work for part in subdivide(batch, fits, split)]
+    return planned
+
+
+def plan_discovery(
+    chunks: Sequence[Chunk], limits: Limits, enabled: bool, check: Callable[[], None] = lambda: None
+) -> tuple[list[tuple[Chunk, ...]], list[int]]:
+    original = batches(chunks, limits)
+    work: list[tuple[Chunk, ...]] = []
+    origins: list[int] = []
+    extra = len(original)
+
+    def fits(part: Sequence[Chunk]) -> bool:
+        check()
+        return request_fits("discover", part, {}, discovery_schema(part), limits)
+
+    for ordinal, part in enumerate(original, 1):
+        planned = planned_chunks([part], fits) if enabled else [part]
+        for index, segment in enumerate(planned):
+            if index:
+                extra += 1
+            origins.append(extra if index else ordinal)
+            work.append(segment)
+    return work, origins
+
+
 class State(TypedDict):
     chunks: tuple[Chunk, ...]
     batches: list[tuple[Chunk, ...]]
@@ -421,15 +525,44 @@ class ExperienceGraph:
         stopped: Callable[[], bool] = lambda: False,
         checkpoints: Checkpoints | None = None,
         remaining_attempts: Callable[[], int] | None = None,
+        isolate_failures: bool = False,
+        events: Callable[[str, str, str | None, dict[str, Any]], None] | None = None,
+        plan_requests: bool = False,
     ):
         self.model, self.limits = model, limits or Limits()
         self.stopped = stopped
         self.checkpoints = checkpoints
         self.remaining_attempts = remaining_attempts
+        self.isolate_failures = isolate_failures
+        self.events = events
+        self.plan_requests = plan_requests
+        self.fragment_chunks: dict[str, Chunk] = {}
+        self.discovery_origins: list[int] = []
+        self.pass_index = 0
+        self.plan_id: str | None = None
+        self.started_units: set[str] = set()
+        self.candidate_proofs: dict[str, dict[str, Any]] = {}
+        self.group_units: dict[str, list[str]] = {}
+        self.audit_pairs: list[dict[str, Any]] = []
+        self.rejected_response: dict[str, Any] | None = None
+        self.accepted_relation_units: list[str] = []
+        self.pending_work: dict[str, Any] | None = None
+        self.entry_limitations: dict[str, tuple[str, ...]] = {}
+        self.halted_code: str | None = None
+        self.visited_units: set[str] = set()
+        self.recovered_units: set[str] = set()
+        self.active_seed_ids: list[str] = []
+        self.unit_cache: dict[str, BaseModel] = {}
+        self.unit_failures: dict[str, dict[str, Any]] = {}
+        self.failure_history: list[dict[str, Any]] = []
+        self.unit_attempts: dict[str, int] = {}
         self.fresh_calls = 0
         self.saved_count = len(getattr(checkpoints, "rows", []))
         self.reviews: list[dict[str, Any]] = []
         self.seed_ids: list[str] = []
+        self.discovery_order: dict[int, int] = {}
+        self.seed_keys: dict[str, str] = {}
+        self.recovery_passes: list[dict[str, Any]] = []
         builder = StateGraph(State)
         builder.add_node("discover", self._discover)
         builder.add_node("consolidate", self._consolidate)
@@ -446,7 +579,111 @@ class ExperienceGraph:
         )
         self.graph = builder.compile()
 
+    def _emit(self, kind: str, phase: str, unit: str | None = None, **data: Any) -> None:
+        if self.events:
+            self.events(
+                kind, phase, unit, {"pass": self.pass_index, "plan_id": self.plan_id, **data}
+            )
+
+    def _fits(
+        self, task: str, chunks: Sequence[Chunk], context: object, schema: type[BaseModel]
+    ) -> bool:
+        self._check_stop()
+        return request_fits(task, chunks, context, schema, self.limits)
+
+    def _chunk_work(
+        self,
+        task: str,
+        work: Sequence[Sequence[Chunk]],
+        context: Callable[[Sequence[Chunk]], object],
+        schema: Callable[[Sequence[Chunk]], type[BaseModel]],
+    ) -> list[tuple[Chunk, ...]]:
+        if not self.plan_requests:
+            return [tuple(part) for part in work]
+
+        def fits(part: Sequence[Chunk]) -> bool:
+            return self._fits(task, part, context(part), schema(part))
+
+        planned = planned_chunks(work, fits)
+        for part in planned:
+            for chunk in part:
+                if "/slice/" in chunk.id:
+                    self.fragment_chunks[chunk.id] = chunk
+        return planned
+
     def _call(
+        self,
+        state: State,
+        task: str,
+        instruction: str,
+        chunks: Sequence[Chunk],
+        context: object,
+        schema: type[BaseModel],
+    ) -> BaseModel:
+        if not self.events:
+            return self._call_impl(state, task, instruction, chunks, context, schema)
+        digest = self._request_digest(task, instruction, chunks, context, schema)
+        reused = digest in self.unit_cache or any(
+            r["task"] == task and r["request_digest"] == digest
+            for r in getattr(self.checkpoints, "rows", [])
+        )
+        if digest not in self.started_units:
+            self._emit(
+                "unit_started",
+                task,
+                digest,
+                context=context,
+                discovery_ordinal=(
+                    self.discovery_origins[state["cursor"]]
+                    if self.plan_requests
+                    else state["cursor"] + 1
+                )
+                if task == "discover"
+                else None,
+                schema=schema.model_json_schema(),
+                chunk_ids=[c.id for c in chunks],
+                chunks=[{"id": c.id, "references": list(c.references)} for c in chunks],
+                seed_ids=self.active_seed_ids if task in {"reconstruct", "audit", "assess"} else [],
+            )
+            self.started_units.add(digest)
+        self.rejected_response = None
+        try:
+            result = self._call_impl(state, task, instruction, chunks, context, schema)
+        except (CollectionError, ValidationError) as exc:
+            from project_log.analysis_events import failure_details
+
+            code = exc.code if isinstance(exc, CollectionError) else "unit_schema_invalid"
+            self._emit(
+                "unit_failed",
+                task,
+                digest,
+                code=code,
+                **(
+                    failure_details(exc, task)
+                    if isinstance(exc, RequestLimit)
+                    else {
+                        "condition": "domain_or_schema_rejected"
+                        if self.rejected_response is not None
+                        else "model_or_control_boundary",
+                        "cause_status": "CONFIRMED"
+                        if self.rejected_response is not None
+                        else "UNKNOWN",
+                    }
+                ),
+                model_reason_status="UNKNOWN",
+                response=self.rejected_response,
+                chunk_ids=[c.id for c in chunks],
+                seed_ids=self.active_seed_ids,
+            )
+            raise
+        self._emit("unit_reused" if reused else "unit_validated", task, digest)
+        if task == "reconcile":
+            self.accepted_relation_units.append(digest)
+        if task in self.group_units:
+            self.group_units[task].append(digest)
+        return result
+
+    def _call_impl(
         self,
         state: State,
         task: str,
@@ -458,35 +695,57 @@ class ExperienceGraph:
         self._check_stop()
         size = len(canonical([c.payload() for c in chunks])) + len(canonical(context))
         if size > (RELATION_CONTEXT_CHARS if task == "reconcile" else 2 * self.limits.batch_chars):
+            if self.plan_requests:
+                raise RequestLimit(
+                    "context_chars",
+                    size,
+                    RELATION_CONTEXT_CHARS if task == "reconcile" else 2 * self.limits.batch_chars,
+                )
             raise CollectionError(
                 "analysis_request_too_large", "분할 입력의 문맥 크기 제한 초과입니다."
             )
         state["calls"] += 1
-        digest = sha256(
-            canonical(
-                {
-                    "task": task,
-                    "instruction": BASE_INSTRUCTION + " " + instruction,
-                    "chunks": [c.payload() for c in chunks],
-                    "context": context,
-                    "schema": schema.model_json_schema(),
-                }
-            ).encode()
-        )
+        digest = self._request_digest(task, instruction, chunks, context, schema)
         cached = self.checkpoints.load(state["calls"], task, digest) if self.checkpoints else None
+        if cached is None and self.isolate_failures and digest in self.unit_cache:
+            cached = self.unit_cache[digest].model_dump()
         if cached is None:
-            validate_plan(
-                task,
-                BASE_INSTRUCTION + " " + instruction,
-                [c.payload() for c in chunks],
-                context,
-                schema.model_json_schema(),
-            )
+            if self.halted_code:
+                raise CollectionError(self.halted_code, "이번 실행의 새 호출이 중단됐습니다.")
+            try:
+                planned_context = (
+                    feedback_context(context)
+                    if self.plan_requests and task == "reconcile" and isinstance(context, dict)
+                    else context
+                )
+                if self.plan_requests and task == "reconcile":
+                    reserved_size = len(canonical([c.payload() for c in chunks])) + len(
+                        canonical(planned_context)
+                    )
+                    if reserved_size > RELATION_CONTEXT_CHARS:
+                        raise RequestLimit("context_chars", reserved_size, RELATION_CONTEXT_CHARS)
+                validate_plan(
+                    task,
+                    BASE_INSTRUCTION + " " + instruction,
+                    [c.payload() for c in chunks],
+                    planned_context,
+                    schema.model_json_schema(),
+                )
+            except RequestLimit as exc:
+                exc.details["context_variant"] = (
+                    "reserved_relation_feedback"
+                    if self.plan_requests and task == "reconcile"
+                    else "original"
+                )
+                exc.details["request_digest"] = digest
+                raise
             self._require_budget(1)
             self.fresh_calls += 1
+            self.unit_attempts[digest] = self.unit_attempts.get(digest, 0) + 1
             generated = self.model.complete(
                 task, BASE_INSTRUCTION + " " + instruction, chunks, canonical(context), schema
             )
+            self.rejected_response = generated.model_dump() if self.events else None
             try:
                 output = schema.model_validate(generated.model_dump())
             except ValidationError:
@@ -502,14 +761,129 @@ class ExperienceGraph:
                     ) from None
                 raise
         else:
-            output = schema.model_validate(cached)
+            try:
+                output = schema.model_validate(cached)
+            except ValidationError:
+                raise CollectionError(
+                    "analysis_checkpoint_invalid", "저장 응답 구조 불일치입니다."
+                ) from None
+        if self.events:
+            self.rejected_response = output.model_dump()
         self._check_stop()
         # Re-run identical domain checks for both fresh and persisted responses. A
         # response is durable only after schema AND stage-specific validation.
-        self._validate_output(task, output, chunks, context)
+        try:
+            self._validate_output(task, output, chunks, context)
+        except CollectionError as exc:
+            if (
+                self.isolate_failures
+                and cached is not None
+                and not (self.isolate_failures and exc.code == "candidate_relation_conflict")
+            ):
+                raise CollectionError(
+                    "analysis_checkpoint_invalid", "저장 응답 검증 불일치입니다."
+                ) from None
+            raise
         if cached is None and self.checkpoints:
             self.checkpoints.save(state["calls"], task, digest, output)
+        if self.isolate_failures:
+            self.unit_cache[digest] = output.model_copy(deep=True)
         self._check_stop()
+        return output
+
+    @staticmethod
+    def _request_digest(
+        task: str,
+        instruction: str,
+        chunks: Sequence[Chunk],
+        context: object,
+        schema: type[BaseModel],
+    ) -> str:
+        return sha256(
+            canonical(
+                {
+                    "task": task,
+                    "instruction": BASE_INSTRUCTION + " " + instruction,
+                    "chunks": [c.payload() for c in chunks],
+                    "context": context,
+                    "schema": schema.model_json_schema(),
+                }
+            ).encode()
+        )
+
+    def _unit(
+        self,
+        state: State,
+        task: str,
+        instruction: str,
+        chunks: Sequence[Chunk],
+        context: object,
+        schema: type[BaseModel],
+    ) -> BaseModel | None:
+        if not self.isolate_failures:
+            return self._call(state, task, instruction, chunks, context, schema)
+        from project_log.experience_recovery import isolatable
+
+        digest = self._request_digest(task, instruction, chunks, context, schema)
+        self.visited_units.add(digest)
+        try:
+            if self.unit_attempts.get(digest, 0) >= 2 and digest not in self.unit_cache:
+                return None  # Keep the original failure; never open a third Graph attempt.
+            output = self._call(state, task, instruction, chunks, context, schema)
+        except (CollectionError, ValidationError) as exc:
+            code = exc.code if isinstance(exc, CollectionError) else "unit_schema_invalid"
+            if code in {
+                "analysis_budget_exceeded",
+                "gemini_free_daily_limit",
+                "provider_minute_limit",
+                "provider_rate_limited",
+            }:
+                self.halted_code = code
+            elif not (isolatable(code) or (self.plan_requests and isinstance(exc, RequestLimit))):
+                raise
+            seed_ids = (
+                self.active_seed_ids
+                if task in {"consolidate", "reconstruct", "audit", "assess"}
+                else []
+            )
+            if isinstance(context, dict):
+                seed_ids = [s["seed_id"] for s in context.get("seeds", [])] or seed_ids
+                seed_ids = seed_ids or context.get("seed_ids", [])
+            failure = {
+                "id": digest,
+                "task": task,
+                "code": code,
+                "chunk_ids": [c.id for c in chunks],
+                "seed_ids": seed_ids,
+            }
+            self.unit_failures[digest] = failure
+            self.failure_history.append(dict(failure))
+            self._emit(
+                "unit_isolated", task, digest, **{k: v for k, v in failure.items() if k != "id"}
+            )
+            if self.events and self.halted_code:
+                from project_log.experience_recovery import ExecutionPaused
+
+                self.pending_work = {
+                    "stage": task,
+                    "unit_digest": digest,
+                    "discovery_cursor": state["cursor"],
+                    "group_seed_ids": self.active_seed_ids,
+                    "remaining_groups": state["group_seed_ids"],
+                }
+                self._emit(
+                    "execution_paused",
+                    task,
+                    digest,
+                    code=self.halted_code,
+                    pending_work=self.pending_work,
+                    unattempted_are_failures=False,
+                )
+                raise ExecutionPaused from None
+            return None
+        if self.unit_failures.pop(digest, None) is not None:
+            self.recovered_units.add(digest)
+            self._emit("unit_recovered", task, digest)
         return output
 
     def _validate_output(
@@ -566,7 +940,7 @@ class ExperienceGraph:
         if not state["batches"]:
             return {"cursor": 0}
         batch = state["batches"][state["cursor"]]
-        output = self._call(
+        output = self._unit(
             state,
             "discover",
             TASK_INSTRUCTIONS["discover"],
@@ -574,13 +948,29 @@ class ExperienceGraph:
             {},
             discovery_schema(batch),
         )
+        if output is None:
+            output = Discovery(seeds=[])
+        elif self.isolate_failures:
+            origin = (
+                self.discovery_origins[state["cursor"]]
+                if self.plan_requests
+                else state["cursor"] + 1
+            )
+            self.discovery_order.setdefault(
+                origin, max(self.discovery_order.values(), default=0) + 1
+            )
         assert isinstance(output, Discovery)
         return {
             "cursor": state["cursor"] + 1,
             "calls": state["calls"],
             "seeds": state["seeds"] + output.seeds,
             "seed_origins": state.get("seed_origins", [])
-            + [state["cursor"] + 1] * len(output.seeds),
+            + [
+                self.discovery_origins[state["cursor"]]
+                if self.plan_requests
+                else state["cursor"] + 1
+            ]
+            * len(output.seeds),
         }
 
     def _initial_consolidate(self, state: State) -> dict[str, Any]:
@@ -600,10 +990,23 @@ class ExperienceGraph:
                 selected.append(seed)
                 cursor += 1
                 size += cost
+            if self.plan_requests:
+                while len(selected) > 1 and not self._fits(
+                    "consolidate",
+                    (),
+                    [
+                        {"seed_id": f"seed_{i:04d}", **seed.model_dump()}
+                        for i, seed in enumerate(selected)
+                    ],
+                    consolidation_schema(len(selected)),
+                ):
+                    selected.pop()
+                    cursor -= 1
             if len(selected) == 1:
                 initial.append([cursor - 1])
                 continue
-            output = self._call(
+            self.active_seed_ids = self.seed_ids[cursor - len(selected) : cursor]
+            output = self._unit(
                 state,
                 "consolidate",
                 TASK_INSTRUCTIONS["consolidate"],
@@ -611,6 +1014,9 @@ class ExperienceGraph:
                 [{"seed_id": f"seed_{i:04d}", **s.model_dump()} for i, s in enumerate(selected)],
                 consolidation_schema(len(selected)),
             )
+            if output is None:
+                initial.extend([[i] for i in range(cursor - len(selected), cursor)])
+                continue
             assert isinstance(output, ConsolidationAssignments)
             assigned: dict[int, list[int]] = {}
             # Membership comes from the immutable input order, never an exhaustive
@@ -627,7 +1033,15 @@ class ExperienceGraph:
         }
 
     def _consolidate(self, state: State) -> dict[str, Any]:
+        self.accepted_relation_units = []
         self.seed_ids = [f"seed_{i:06d}" for i in range(len(state["seeds"]))]
+        positions: dict[int, int] = {}
+        for key, seed, origin in zip(
+            self.seed_ids, state["seeds"], state["seed_origins"], strict=True
+        ):
+            position = positions.get(origin, 0)
+            positions[origin] = position + 1
+            self.seed_keys[key] = sha256(canonical([origin, position, seed.model_dump()]).encode())
         initial = self._initial_consolidate(state)["indices"]
         initial_ids = [[self.seed_ids[i] for i in g] for g in initial]
         contexts = self._review_contexts(state, initial)
@@ -636,7 +1050,7 @@ class ExperienceGraph:
         for context in contexts:
             if len(context["seeds"]) < 2:
                 continue
-            output = self._call(
+            output = self._unit(
                 state,
                 "reconcile",
                 TASK_INSTRUCTIONS["reconcile"],
@@ -646,6 +1060,8 @@ class ExperienceGraph:
                     [s["seed_id"] for s in context["seeds"]], [s["id"] for s in context["supports"]]
                 ),
             )
+            if output is None:
+                continue
             assert isinstance(output, Reconciliation)
             self.reviews.append(output.model_dump())
             records.append(
@@ -670,7 +1086,16 @@ class ExperienceGraph:
         trace = {
             "policy": RELATION_POLICY,
             "seeds": [
-                {"seed_id": key, "discovery_ordinal": origin, "evidence_ids": seed.evidence_ids}
+                {
+                    "seed_id": key,
+                    "discovery_ordinal": origin,
+                    "evidence_ids": seed.evidence_ids,
+                    **(
+                        {"title": seed.title, "seed_key": self.seed_keys[key]}
+                        if self.isolate_failures
+                        else {}
+                    ),
+                }
                 for key, origin, seed in zip(
                     self.seed_ids,
                     state.get("seed_origins", [0] * len(by_id)),
@@ -719,7 +1144,11 @@ class ExperienceGraph:
 
     def _review_contexts(self, state: State, initial: list[list[int]]) -> list[dict[str, Any]]:
         chunks = {c.id: c for c in state["chunks"]}
-        positions = {key: i for i, key in enumerate(chunks)}
+        positions = (
+            self.chunk_positions
+            if self.plan_requests and hasattr(self, "chunk_positions")
+            else {key: i for i, key in enumerate(chunks)}
+        )
         seed_data = [s.model_dump() for s in state["seeds"]]
         features = []
         for seed in state["seeds"]:
@@ -803,7 +1232,9 @@ class ExperienceGraph:
         contexts = []
         seen: set[tuple[int, ...]] = set()
         for window in windows(seed_data, features, RELATION_CONTEXT_CHARS):
-            for part in pair_cover(window, fits):
+            for part in pair_cover(
+                window, lambda part: fits(part) or (self.plan_requests and len(part) == 2)
+            ):
                 key = tuple(part)
                 if key not in seen:
                     seen.add(key)
@@ -829,9 +1260,28 @@ class ExperienceGraph:
             term.casefold().strip() for seed in group for term in seed.search_terms if term.strip()
         }
         result: list[Chunk] = []
+        priority: dict[str, tuple[int, int]] = {}
+        frequencies = {
+            term: sum(term in (c.text or "").casefold() for c in chunks) for term in terms
+        }
+        anchor_count = commit_count = term_count = 0
         for chunk in chunks:
             self._check_stop()
             sources = json.loads(chunk.sources_json)
+            direct = chunk.id in seeds
+            anchor = (
+                direct
+                or bool(initial_refs.intersection(chunk.references))
+                or any(
+                    str(source.get(k, "")) in paths
+                    for source in sources
+                    for k in ("path_b64", "old_path_b64", "new_path_b64")
+                )
+            )
+            commit = any(
+                (source.get("commit_oid") or source.get("oid")) in commits for source in sources
+            )
+            matching_terms = [term for term in terms if term in (chunk.text or "").casefold()]
             matched = (
                 chunk.id in seeds
                 or bool(initial_refs.intersection(chunk.references))
@@ -847,7 +1297,25 @@ class ExperienceGraph:
             )
             if matched:
                 result.append(chunk)
-        return result
+                anchor_count += anchor
+                commit_count += commit
+                term_count += bool(matching_terms)
+                priority[chunk.id] = (
+                    0 if direct else 1 if anchor else 2 if matching_terms else 3,
+                    min((frequencies[t] for t in matching_terms), default=len(chunks)),
+                )
+        self.related_original = list(result)
+        self.retrieval_summary = {
+            "input_chunks": len(chunks),
+            "selected_chunks": len(result),
+            "anchor_chunks": anchor_count,
+            "weak_only_chunks": len(result) - anchor_count,
+            "commit_matches": commit_count,
+            "term_matches": term_count,
+            "dropped_chunks": 0,
+            "selection": "all_original_matches_retained_direct_path_rare_term_priority",
+        }
+        return sorted(result, key=lambda c: priority[c.id]) if self.plan_requests else result
 
     @staticmethod
     def _validate_claims(claims: list[Claim], available: Sequence[Chunk]) -> None:
@@ -908,7 +1376,13 @@ class ExperienceGraph:
     ) -> object:
         full = [seed.model_dump() for seed in group]
         available = 2 * self.limits.batch_chars - len(canonical([c.payload() for c in batch]))
-        if len(canonical(full)) <= available:
+        if self.plan_requests:
+            # Partition evidence before reducing a representable Seed context.
+            # Otherwise a nearly full batch could hide Seed descriptions even
+            # though smaller batches can retain the complete context unchanged.
+            if self._fits("reconstruct", (), full, Reconstruction):
+                return full
+        elif len(canonical(full)) <= available:
             return full
         refs = {c.id for c in batch}
         ranked = sorted(
@@ -922,12 +1396,24 @@ class ExperienceGraph:
         }
         for i in ranked:
             entry = {"seed_id": ids[i], **full[i]}
-            if (
-                len(canonical({**context, "focus_seeds": [*context["focus_seeds"], entry]}))
-                <= available
+            if len(
+                canonical({**context, "focus_seeds": [*context["focus_seeds"], entry]})
+            ) <= available and (
+                not self.plan_requests
+                or self._fits(
+                    "reconstruct",
+                    batch,
+                    {**context, "focus_seeds": [*context["focus_seeds"], entry]},
+                    Reconstruction,
+                )
             ):
                 context["focus_seeds"].append(entry)
         if not context["focus_seeds"]:
+            if self.plan_requests:
+                # Return the required minimum intact; the planner can split text,
+                # or record an unsplittable unit without inventing empty context.
+                context["focus_seeds"] = [{"seed_id": ids[ranked[0]], **full[ranked[0]]}]
+                return context
             raise CollectionError(
                 "analysis_request_too_large", "최종 그룹의 복원 문맥이 제한을 초과했습니다."
             )
@@ -937,10 +1423,53 @@ class ExperienceGraph:
         group = state["groups"][0]
         group_ids = state["group_seed_ids"][0]
         related = self._related(group, state["chunks"])
+        self.group_units = {"reconstruct": [], "audit": [], "assess": []}
+        self.audit_pairs = []
+        work = batches(related, self.limits)
+        if self.plan_requests:
+            saved = {
+                r["request_digest"]
+                for r in getattr(self.checkpoints, "rows", [])
+                if r["task"] == "reconstruct"
+            }
+            preserved = [
+                batch
+                for batch in batches(getattr(self, "related_original", related), self.limits)
+                if self._request_digest(
+                    "reconstruct",
+                    TASK_INSTRUCTIONS["reconstruct"],
+                    batch,
+                    self._reconstruction_context(group, group_ids, batch),
+                    Reconstruction,
+                )
+                in saved
+                and self._fits(
+                    "reconstruct",
+                    batch,
+                    self._reconstruction_context(group, group_ids, batch),
+                    Reconstruction,
+                )
+            ]
+            covered = {c.id for batch in preserved for c in batch}
+            work = preserved + self._chunk_work(
+                "reconstruct",
+                batches([c for c in related if c.id not in covered], self.limits),
+                lambda batch: self._reconstruction_context(group, group_ids, batch),
+                lambda batch: Reconstruction,
+            )
+        self._emit(
+            "candidate_started",
+            "candidate",
+            group_key=sha256(canonical([self.seed_keys[key] for key in group_ids]).encode()),
+            seed_ids=group_ids,
+            expected_reconstruction_count=len(work),
+            retrieval=getattr(self, "retrieval_summary", None),
+        )
         claims: list[Claim] = []
+        incomplete = False
         grounding_notes: list[str] = []
-        for batch in batches(related, self.limits):
-            output = self._call(
+        for batch in work:
+            output = self._unit(
                 state,
                 "reconstruct",
                 TASK_INSTRUCTIONS["reconstruct"],
@@ -948,20 +1477,63 @@ class ExperienceGraph:
                 self._reconstruction_context(group, group_ids, batch),
                 Reconstruction,
             )
+            if output is None:
+                incomplete = True
+                continue
             assert isinstance(output, Reconstruction)
+            pair: dict[str, Any] = {
+                "reconstruct": self._request_digest(
+                    "reconstruct",
+                    TASK_INSTRUCTIONS["reconstruct"],
+                    batch,
+                    self._reconstruction_context(group, group_ids, batch),
+                    Reconstruction,
+                ),
+                "audit": None,
+            }
             # Separate claim-level grounding review; never upgrades EvidenceStatus.
             if output.claims:
-                audit = self._call(
-                    state,
-                    "audit",
-                    TASK_INSTRUCTIONS["audit"],
-                    batch,
-                    [c.model_dump() for c in output.claims],
-                    Audit,
+
+                def audit_fits(part: Sequence[Claim], source: Sequence[Chunk] = batch) -> bool:
+                    return self._fits("audit", source, [c.model_dump() for c in part], Audit)
+
+                audit_work = (
+                    subdivide(output.claims, audit_fits)
+                    if self.plan_requests
+                    else [tuple(output.claims)]
                 )
-                assert isinstance(audit, Audit)
-                for finding in audit.findings:
-                    claim = output.claims[finding.claim_index]
+                checked_findings: list[tuple[int, Finding]] = []
+                checked_units = []
+                claim_offset = 0
+                audit_incomplete = False
+                for audit_part in audit_work:
+                    context = [c.model_dump() for c in audit_part]
+                    audit = self._unit(
+                        state, "audit", TASK_INSTRUCTIONS["audit"], batch, context, Audit
+                    )
+                    if audit is None:
+                        incomplete = audit_incomplete = True
+                    else:
+                        assert isinstance(audit, Audit)
+                        unit = self._request_digest(
+                            "audit", TASK_INSTRUCTIONS["audit"], batch, context, Audit
+                        )
+                        checked_units.append(
+                            {"unit": unit, "start": claim_offset, "count": len(audit_part)}
+                        )
+                        checked_findings.extend(
+                            (claim_offset + finding.claim_index, finding)
+                            for finding in audit.findings
+                        )
+                    claim_offset += len(audit_part)
+                if audit_incomplete:
+                    continue
+                if len(checked_units) == 1:
+                    pair["audit"] = checked_units[0]["unit"]
+                else:
+                    pair["audits"] = checked_units
+                for claim_index, finding in checked_findings:
+                    claim = output.claims[claim_index]
                     if not finding.supported and claim.status != "UNKNOWN":
                         grounding_notes.append(
                             "채택하지 않은 AI 주장: "
@@ -977,6 +1549,17 @@ class ExperienceGraph:
                         )
                     if claim not in claims:
                         claims.append(claim)
+            self.audit_pairs.append(pair)
+        if incomplete:
+            # Assessment depends on all reconstruction/audit units of this group.
+            # Other groups can proceed; a provisional UNKNOWN-only assessment is
+            # neither independent work nor a final candidate.
+            return {
+                "groups": state["groups"][1:],
+                "group_seed_ids": state["group_seed_ids"][1:],
+                "calls": state["calls"],
+                "candidates": state["candidates"],
+            }
         for section in SECTIONS:
             if not any(c.section == section for c in claims):
                 claims.append(
@@ -1000,8 +1583,22 @@ class ExperienceGraph:
             size += cost
         if pending:
             claim_batches.append(pending)
+        if self.plan_requests:
+            claim_batches = [
+                list(part)
+                for old in claim_batches
+                for part in subdivide(
+                    old,
+                    lambda part: self._fits(
+                        "assess",
+                        (),
+                        {"title": group[0].title, "claims": [c.model_dump() for c in part]},
+                        Assessment,
+                    ),
+                )
+            ]
         for part in claim_batches:
-            assessment = self._call(
+            assessment = self._unit(
                 state,
                 "assess",
                 TASK_INSTRUCTIONS["assess"],
@@ -1009,12 +1606,32 @@ class ExperienceGraph:
                 {"title": group[0].title, "claims": [c.model_dump() for c in part]},
                 Assessment,
             )
+            if assessment is None:
+                incomplete = True
+                continue
             assert isinstance(assessment, Assessment)
             assessments.append(assessment)
+        if incomplete:
+            return {
+                "groups": state["groups"][1:],
+                "group_seed_ids": state["group_seed_ids"][1:],
+                "calls": state["calls"],
+                "candidates": state["candidates"],
+            }
         # Final references are the source observations, with chunk quotes/offsets kept in claims.
         refs = sorted({ref for c in related for ref in c.references})
         candidate = Candidate(
-            id=sha256(canonical([CONSOLIDATION_POLICY, state["input_digest"], group_ids]).encode()),
+            id=sha256(
+                canonical(
+                    [
+                        CONSOLIDATION_POLICY,
+                        state["input_digest"],
+                        [self.seed_keys[key] for key in group_ids]
+                        if self.isolate_failures
+                        else group_ids,
+                    ]
+                ).encode()
+            ),
             seed_ids=group_ids,
             title=group[0].title,
             category="strong"
@@ -1027,6 +1644,35 @@ class ExperienceGraph:
             limitations=["AI 해석·근거 검사는 사용자 사실 확인을 대신하지 않습니다."],
             grounding_notes=grounding_notes,
         )
+        if self.events:
+            candidate.limitations.extend(
+                sorted(
+                    {
+                        limitation
+                        for ref in candidate.evidence_ids
+                        for limitation in self.entry_limitations.get(ref, ())
+                    }
+                )
+            )
+            if any(
+                f["task"] in {"consolidate", "reconcile"}
+                and (not f["seed_ids"] or set(group_ids).intersection(f["seed_ids"]))
+                for f in self.unit_failures.values()
+            ):
+                candidate.limitations.append(
+                    "일부 후보 관계가 미해결입니다. 독립 경험 확정이 아닙니다."
+                )
+            proof: dict[str, Any] = {
+                "candidate": candidate.model_dump(),
+                "plan_id": self.plan_id,
+                "group_key": sha256(canonical([self.seed_keys[key] for key in group_ids]).encode()),
+                "required_units": self.group_units,
+                "audit_pairs": self.audit_pairs,
+                "expected_reconstruction_count": len(work),
+                "expected_assessment_count": len(claim_batches),
+            }
+            self._emit("candidate_validated", "candidate", **proof)
+            self.candidate_proofs[candidate.id] = proof
         return {
             "groups": state["groups"][1:],
             "group_seed_ids": state["group_seed_ids"][1:],
@@ -1034,18 +1680,53 @@ class ExperienceGraph:
             "candidates": state["candidates"] + [candidate],
         }
 
+    def _run_isolated(self, state: State) -> State:
+        from project_log.experience_recovery import run_isolated
+
+        return run_isolated(self, state)
+
     def run(self, snapshot: ExperienceInput) -> AnalysisResult:
         self.fresh_calls, self.reviews = 0, []
+        self.halted_code = None
+        self.started_units, self.candidate_proofs = set(), {}
+        self.pending_work, self.plan_id = None, None
+        self.unit_cache, self.unit_failures, self.unit_attempts = {}, {}, {}
+        self.failure_history, self.recovery_passes = [], []
+        self.recovered_units, self.visited_units = set(), set()
         self.saved_count = len(getattr(self.checkpoints, "rows", []))
         self._check_stop()
         if snapshot.policy != EXPERIENCE_INPUT_POLICY:
             raise CollectionError(
                 "analysis_policy_changed", "현재 정책으로 다시 준비하고 동의하세요."
             )
+        self.entry_limitations = {e.reference: e.limitations for e in snapshot.entries}
         chunks = split_evidence(snapshot, self.limits, self._check_stop)
+        self.chunk_positions = {c.id: i for i, c in enumerate(chunks)}
+        self.fragment_chunks = {}
+        discovery_work, self.discovery_origins = plan_discovery(
+            chunks, self.limits, self.plan_requests, self._check_stop
+        )
+        if self.plan_requests:
+            chunks = tuple({c.id: c for part in discovery_work for c in part}.values())
+            self.fragment_chunks.update({c.id: c for c in chunks if "/slice/" in c.id})
+            for chunk in chunks:
+                self.chunk_positions.setdefault(chunk.id, len(self.chunk_positions))
+        self.discovery_order = {}
+        if self.isolate_failures:
+            saved = {
+                r["request_digest"]: i
+                for i, r in enumerate(getattr(self.checkpoints, "rows", []), 1)
+                if r["task"] == "discover"
+            }
+            for origin, batch in zip(self.discovery_origins, discovery_work, strict=True):
+                digest = self._request_digest(
+                    "discover", TASK_INSTRUCTIONS["discover"], batch, {}, discovery_schema(batch)
+                )
+                if digest in saved:
+                    self.discovery_order[origin] = saved[digest]
         initial: State = {
             "chunks": chunks,
-            "batches": batches(chunks, self.limits),
+            "batches": discovery_work,
             "cursor": 0,
             "calls": 0,
             "seeds": [],
@@ -1058,17 +1739,52 @@ class ExperienceGraph:
         }
         # No ambient tracing/callbacks/checkpointer can export evidence or model results.
         with tracing_context(enabled=False):
-            final = self.graph.invoke(
-                initial,
-                config={
-                    "callbacks": [],
-                    "recursion_limit": (self.saved_count + self.limits.max_calls) * 2 + 10,
-                },
+            final = (
+                self._run_isolated(initial)
+                if self.isolate_failures
+                else self.graph.invoke(
+                    initial,
+                    config={
+                        "callbacks": [],
+                        "recursion_limit": (self.saved_count + self.limits.max_calls) * 2 + 10,
+                    },
+                )
             )
         self._check_stop()
         if self.checkpoints:
             self.checkpoints.finish(final["calls"])
         coverage = {
+            **(
+                {
+                    "analysis_status": "partial" if self.unit_failures else "complete",
+                    "failure_policy": FAILURE_POLICY,
+                    "stop_code": self.halted_code,
+                    "unresolved": list(self.unit_failures.values())[:100]
+                    if self.events
+                    else list(self.unit_failures.values()),
+                    **(
+                        {
+                            "unresolved_total": len(self.unit_failures),
+                            "events_available": True,
+                            "pending_work": self.pending_work,
+                        }
+                        if self.events
+                        else {}
+                    ),
+                    "failure_history": [] if self.events else self.failure_history,
+                    "recovered_unit_ids": sorted(self.recovered_units)[:100]
+                    if self.events
+                    else sorted(self.recovered_units),
+                    "superseded_unit_ids": sorted(
+                        {f["id"] for f in self.failure_history}
+                        - self.unit_failures.keys()
+                        - self.recovered_units
+                    ),
+                    "recovery_passes": [] if self.events else self.recovery_passes,
+                }
+                if self.isolate_failures
+                else {}
+            ),
             "consolidation": final["consolidation"],
             "offset_basis": "prepared_input",
             "collections": [str(c["id"]) for c in json.loads(snapshot.collections_json)],
@@ -1092,9 +1808,20 @@ class ExperienceGraph:
                     "media_sha256": c.media.digest if c.media else None,
                     "media": c.media.descriptor() if c.media else None,
                 }
-                for c in chunks
+                for c in {**{c.id: c for c in chunks}, **self.fragment_chunks}.values()
             ],
         }
+        self._emit(
+            "graph_finished",
+            "graph",
+            status="partial" if self.unit_failures else "complete",
+            candidate_ids=[c.id for c in final["candidates"]],
+            unresolved_total=len(self.unit_failures),
+            unresolved=list(self.unit_failures.values()),
+            recovered_total=len(self.recovered_units),
+            stop_code=self.halted_code,
+            pending_work=self.pending_work,
+        )
         for candidate in final["candidates"]:
             related_limits = {
                 limitation
@@ -1102,7 +1829,7 @@ class ExperienceGraph:
                 if entry.reference in candidate.evidence_ids
                 for limitation in entry.limitations
             }
-            candidate.limitations.extend(sorted(related_limits))
+            candidate.limitations.extend(sorted(related_limits - set(candidate.limitations)))
         return AnalysisResult(
             input_digest=snapshot.digest,
             policy=ANALYSIS_POLICY,

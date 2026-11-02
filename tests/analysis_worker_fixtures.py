@@ -10,7 +10,7 @@ from test_experience_gemini import ModelConnection
 from test_experiences import OfflineModel
 
 from project_log.experience_gemini import GeminiExperienceModel, TransientProviderError
-from project_log.experiences import Discovery
+from project_log.experiences import Citation, Claim, Discovery, Reconstruction
 from project_log.gemini import GeminiConfig
 from project_log.gemini_free_tier import FreeTierQuota, MinuteProviderError
 from project_log.git import CollectionError
@@ -48,7 +48,57 @@ class ControlledOffline(OfflineModel):
                 time.sleep(0.02)
         if self.mode == "503always" or (self.mode == "503once" and self.attempts == 1):
             raise TransientProviderError()
+        if (
+            self.mode in {"durable_quota_after_candidate", "durable_block_after_candidate"}
+            and args[0] == "reconstruct"
+        ):
+            self.reconstruction_calls = getattr(self, "reconstruction_calls", 0) + 1
+            if self.reconstruction_calls == 2:
+                if self.mode == "durable_quota_after_candidate":
+                    raise CollectionError(
+                        "gemini_free_daily_limit", "Synthetic quota after valid candidate"
+                    )
+                while not (self.directory / "release").exists():
+                    time.sleep(0.02)
+        if self.mode == "planning_short_claims" and args[0] == "reconstruct":
+            return Reconstruction(
+                claims=[
+                    Claim(
+                        section="implementation",
+                        statement=c.text[:100],
+                        status="EVIDENCED",
+                        citations=[Citation(evidence_id=c.id, quote=c.text[:100], locator=None)],
+                    )
+                    for c in args[2]
+                    if c.text
+                ]
+            )
         result = super().complete(*args)
+        if self.mode == "planning_many_claims" and args[0] == "reconstruct":
+            result.claims = [
+                result.claims[0].model_copy(update={"statement": f"{i}:" + "한글" * 500})
+                for i in range(50)
+            ]
+        if self.mode == "durable_recover_audit" and args[0] == "audit":
+            self.audit_calls = getattr(self, "audit_calls", 0) + 1
+            if self.audit_calls == 1:
+                result.findings = []
+        if (
+            self.mode
+            in {
+                "durable_quota_after_candidate",
+                "durable_block_after_candidate",
+                "durable_recover_audit",
+            }
+            and args[0] == "reconcile"
+        ):
+            context = json.loads(args[3])
+            result.assignments = {s["seed_id"]: i for i, s in enumerate(context["seeds"])}
+            ground = result.grounds[0].model_copy(
+                update={"label": context["seeds"][0]["initial_group"]}
+            )
+            result.grounds = []
+            result.splits = [ground]
         if args[0] == "reconcile" and self.mode.startswith("grounding_"):
             if self.mode == "grounding_503_first" and self.attempts == 3:
                 raise TransientProviderError()

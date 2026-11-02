@@ -84,6 +84,18 @@ def terminal(client, pid, rid, *, timeout=15):
     return wait_for(read, timeout=timeout)
 
 
+def partial_result(db, row, code):
+    assert row["state"] == "failed" and row["result_run_id"] is not None
+    assert row["error_code"] == "analysis_partial"
+    result = db.one("SELECT result FROM experience_runs WHERE id=%s", (row["result_run_id"],))[
+        "result"
+    ]
+    assert result["coverage"]["analysis_status"] == "partial"
+    assert result["coverage"]["unresolved"]
+    assert code in {f["code"] for f in result["coverage"]["failure_history"]}
+    return result
+
+
 @pytest.mark.parametrize("mode", ["grounding_extra_labels", "grounding_blank_reason"])
 def test_changed_error_family_shares_budget_and_blank_reason_never_regenerates(db, tmp_path, mode):
     pid, cid, control, mode_file, options = setup(db, tmp_path)
@@ -95,7 +107,7 @@ def test_changed_error_family_shares_budget_and_blank_reason_never_regenerates(d
         assert not db.all("SELECT * FROM analysis_calls")
         request = submit(client, pid, body(prep))
         failed = terminal(client, pid, request["id"])
-        assert failed["state"] == "failed" and failed["result_run_id"] is None
+        assert failed["state"] == "failed" and failed["result_run_id"] is not None
         calls = db.all("SELECT * FROM analysis_calls ORDER BY seq")
         relations = [row for row in calls if row["phase"] == "reconcile"]
         if mode == "grounding_extra_labels":
@@ -104,18 +116,23 @@ def test_changed_error_family_shares_budget_and_blank_reason_never_regenerates(d
                 "candidate_relation_grounding_split_labels_m0_x1_d0",
             ]
             assert relations[0]["logical_digest"] == relations[1]["logical_digest"]
-            assert failed["error_code"] == relations[-1]["error_code"]
-            assert failed["resume_block_reason"] == "analysis_relation_attempts_exhausted"
+            partial_result(db, failed, relations[-1]["error_code"])
+            assert failed["resume_block_reason"] is None
         else:
             assert len(relations) == 1
-            assert failed["error_code"] == "candidate_relation_grounding_merge_reason_blank_n1"
-            assert failed["resume_block_reason"] == "analysis_resume_validation_required"
-        assert [
-            row["task"] for row in db.all("SELECT * FROM analysis_checkpoints ORDER BY ordinal")
-        ] == [
-            "discover",
-            "consolidate",
-        ]
+            partial_result(db, failed, "candidate_relation_grounding_merge_reason_blank_n1")
+            assert failed["resume_block_reason"] is None
+        checkpoints = db.all("SELECT * FROM analysis_checkpoints ORDER BY ordinal")
+        assert [row["task"] for row in checkpoints[:2]] == ["discover", "consolidate"]
+        assert all(row["task"] != "reconcile" for row in checkpoints)
+        assert (
+            len(
+                db.one(
+                    "SELECT result FROM experience_runs WHERE id=%s", (failed["result_run_id"],)
+                )["result"]["candidates"]
+            )
+            == 2
+        )
         assert len(list(control.glob("attempt-*"))) == len(calls)
 
 
@@ -141,18 +158,20 @@ def test_grounding_diagnostic_survives_spawn_and_api_with_bounded_recovery(
         assert not list(control.glob("attempt-*"))
         request = submit(client, pid, body(prep))
         failed = terminal(client, pid, request["id"])
-        assert failed["state"] == "failed" and failed["error_code"] == code
-        assert failed["result_run_id"] is None
-        assert failed["resume_block_reason"] == "analysis_relation_attempts_exhausted"
+        result = partial_result(db, failed, code)
+        assert len(result["candidates"]) == 2
+        assert failed["resume_block_reason"] is None
         assert not failed["resume_contract_changed"] and not failed["diagnostic_available"]
         calls = db.all("SELECT * FROM analysis_calls ORDER BY seq")
-        assert [c["phase"] for c in calls] == ["discover", "consolidate", "reconcile", "reconcile"]
+        relations = [c for c in calls if c["phase"] == "reconcile"]
+        assert len(relations) == 2
         assert all(c["outcome"] == "responded" for c in calls)
-        assert [c["error_code"] for c in calls[-2:]] == [code, code]
-        assert calls[-1]["logical_digest"] == calls[-2]["logical_digest"]
+        assert [c["error_code"] for c in relations] == [code, code]
+        assert relations[-1]["logical_digest"] == relations[-2]["logical_digest"]
         assert len(list(control.glob("attempt-*"))) == len(calls)
         checkpoints = db.all("SELECT * FROM analysis_checkpoints ORDER BY ordinal")
-        assert [c["task"] for c in checkpoints] == ["discover", "consolidate"]
+        assert [c["task"] for c in checkpoints[:2]] == ["discover", "consolidate"]
+        assert all(c["task"] != "reconcile" for c in checkpoints)
         blocked = client.post(
             f"/api/projects/{pid}/analysis/preparations",
             json={
@@ -161,11 +180,11 @@ def test_grounding_diagnostic_survives_spawn_and_api_with_bounded_recovery(
                 "resume_from_request_id": request["id"],
             },
         ).json()
-        assert blocked["state"] == "failed"
-        assert blocked["error_code"] == "analysis_relation_attempts_exhausted"
+        assert blocked["state"] == "ready"
+        assert blocked["descriptor"]["resume"]["checkpoint_count"] == len(checkpoints)
         assert db.all("SELECT * FROM analysis_calls ORDER BY seq") == calls
         assert db.all("SELECT * FROM analysis_checkpoints ORDER BY ordinal") == checkpoints
-        assert not db.all("SELECT * FROM experience_runs")
+        assert len(db.all("SELECT * FROM experience_runs")) == 1
         # A historical unclassified failure remains blocked under this identical contract.
         db.execute(
             "UPDATE analysis_requests SET error_code=%s WHERE id=%s",
@@ -291,8 +310,11 @@ def test_grounding_feedback_and_transport_share_cap_even_in_independent_new_run(
     with TestClient(create_app(db, **options)) as client:
         row = submit(client, pid, body(prepare(client, pid, cid)))
         failed = terminal(client, pid, row["id"], timeout=45)
-        assert failed["error_code"] == last
-        assert failed["resume_block_reason"] == "analysis_relation_attempts_exhausted"
+        if mode == "grounding_merge_then_429":
+            assert failed["error_code"] == last
+        else:
+            partial_result(db, failed, last)
+            assert failed["resume_block_reason"] is None
         calls = db.all("SELECT * FROM analysis_calls WHERE phase='reconcile' ORDER BY entered_at")
         assert (
             len(calls) == 2
@@ -302,7 +324,7 @@ def test_grounding_feedback_and_transport_share_cap_even_in_independent_new_run(
         # Same input without a Resume parent cannot create a third attempt.
         another = submit(client, pid, body(prepare(client, pid, cid)))
         stopped = terminal(client, pid, another["id"])
-        assert stopped["error_code"] == "analysis_relation_attempts_exhausted"
+        partial_result(db, stopped, "analysis_relation_attempts_exhausted")
         assert (
             db.all("SELECT * FROM analysis_calls WHERE phase='reconcile' ORDER BY entered_at")
             == calls
@@ -311,11 +333,12 @@ def test_grounding_feedback_and_transport_share_cap_even_in_independent_new_run(
     db.execute("UPDATE analysis_calls SET entered_at=entered_at-interval '2 days'")
     with TestClient(create_app(db, **options)) as client:
         historical = client.get(f"/api/projects/{pid}/analysis/requests/{row['id']}").json()
-        assert historical["resume_block_reason"] == "analysis_relation_attempts_exhausted"
+        assert historical["resume_block_reason"] == (
+            "analysis_relation_attempts_exhausted" if mode == "grounding_merge_then_429" else None
+        )
         third = submit(client, pid, body(prepare(client, pid, cid)))
-        assert (
-            terminal(client, pid, third["id"])["error_code"]
-            == "analysis_relation_attempts_exhausted"
+        partial_result(
+            db, terminal(client, pid, third["id"]), "analysis_relation_attempts_exhausted"
         )
         assert len(db.all("SELECT * FROM analysis_calls WHERE phase='reconcile'")) == 2
 
@@ -351,6 +374,7 @@ def test_remaining_feedback_survives_quota_day_run_and_server_restart(
             variant=None,
             feedback_code=None,
             logical_digest=None,
+            unit_request_digest=None,
         ):
             if variant == "feedback":
                 from project_log.git import CollectionError
@@ -364,7 +388,16 @@ def test_remaining_feedback_survives_quota_day_run_and_server_restart(
                 )
                 raise CollectionError(actual, "Synthetic stop before HTTP entry")
             return enter(
-                project, request, owner, seq, phase, digest, variant, feedback_code, logical_digest
+                project,
+                request,
+                owner,
+                seq,
+                phase,
+                digest,
+                variant,
+                feedback_code,
+                logical_digest,
+                unit_request_digest,
             )
 
         monkeypatch.setattr(worker.state, "enter_call", deny_feedback)
@@ -463,11 +496,21 @@ def test_valid_regenerated_checkpoint_replays_without_new_reconcile_or_quota_ent
             variant=None,
             feedback_code=None,
             logical_digest=None,
+            unit_request_digest=None,
         ):
             if phase == "audit":
                 raise CollectionError("provider_network_error", "Synthetic interruption")
             return enter(
-                project, request, owner, seq, phase, digest, variant, feedback_code, logical_digest
+                project,
+                request,
+                owner,
+                seq,
+                phase,
+                digest,
+                variant,
+                feedback_code,
+                logical_digest,
+                unit_request_digest,
             )
 
         monkeypatch.setattr(worker.state, "enter_call", stop_before_audit)
@@ -521,7 +564,7 @@ def test_reviewed_contract_transition_preserves_spent_history_and_new_shared_cap
     mode_file.write_text("grounding_extra_labels")
     with TestClient(create_app(db, **options)) as client:
         original = submit(client, pid, body(prepare(client, pid, cid)))
-        assert terminal(client, pid, original["id"])["call_seq"] == 4
+        assert terminal(client, pid, original["id"])["call_seq"] == 10
     source = db.one("SELECT * FROM analysis_requests WHERE id=%s", (original["id"],))
     # Only historical metadata is rebound in the disposable DB. This does not
     # claim that the prior compiler ran. Its two known attempts remain spent.
@@ -529,7 +572,8 @@ def test_reviewed_contract_transition_preserves_spent_history_and_new_shared_cap
     old = {**consent["descriptor"]["profile"], "instruction_digest": PREVIOUS_RELATION_INSTRUCTION}
     consent["descriptor"]["profile"] = old
     db.execute(
-        "UPDATE analysis_requests SET consent=%s WHERE id=%s", (Jsonb(consent), original["id"])
+        "UPDATE analysis_requests SET consent=%s,error_code=%s WHERE id=%s",
+        (Jsonb(consent), "candidate_relation_grounding_split_labels_m0_x1_d0", original["id"]),
     )
     db.execute(
         "UPDATE analysis_checkpoints SET contract_digest=%s WHERE request_id=%s",
@@ -610,7 +654,9 @@ def test_reviewed_contract_transition_preserves_spent_history_and_new_shared_cap
             terminal(client, pid, target["id"])
             if outcome == "independent_cancelled":
                 db.execute(
-                    "UPDATE analysis_requests SET state='cancelled' WHERE id=%s", (target["id"],)
+                    "UPDATE analysis_requests SET state='cancelled',result_run_id=NULL,"
+                    "result_partial=false WHERE id=%s",
+                    (target["id"],),
                 )
             replay = client.post(f"/api/projects/{pid}/analysis/requests", json=body(first)).json()
             assert (
@@ -627,7 +673,9 @@ def test_reviewed_contract_transition_preserves_spent_history_and_new_shared_cap
             target = submit(client, pid, body(first))
             done = terminal(client, pid, target["id"])
             assert done["state"] == ("completed" if outcome == "success" else "failed"), done
-            assert done["inherited_attempts"] == 4 and done["reused_checkpoints"] == 2
+            assert (
+                done["inherited_attempts"] == source["call_seq"] and done["reused_checkpoints"] == 2
+            )
             fresh = db.all(
                 "SELECT * FROM analysis_calls WHERE request_id=%s ORDER BY seq", (target["id"],)
             )
@@ -646,7 +694,8 @@ def test_reviewed_contract_transition_preserves_spent_history_and_new_shared_cap
                 )
                 assert cp["origin_call_seq"] == 2
             else:
-                assert done["resume_block_reason"] == "analysis_relation_attempts_exhausted"
+                assert done["resume_block_reason"] is None
+                partial_result(db, done, "analysis_relation_attempts_exhausted")
             duplicate = client.post(
                 f"/api/projects/{pid}/analysis/requests", json=body(sibling)
             ).json()
@@ -678,7 +727,7 @@ def test_reviewed_contract_transition_preserves_spent_history_and_new_shared_cap
             if outcome == "independent_cancelled":
                 assert view["state"] == "cancelled"
             else:
-                assert view["resume_block_reason"] == "analysis_relation_attempts_exhausted"
+                assert view["resume_block_reason"] is None
             if outcome.startswith("independent"):
                 assert (
                     client.get(f"/api/projects/{pid}/analysis/requests/{original['id']}").json()[

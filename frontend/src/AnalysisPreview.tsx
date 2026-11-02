@@ -18,6 +18,9 @@ export default function AnalysisPreview({prepared,actions,onReady}:{prepared:Pre
     if(!read.current){setError('전송 본문 확인 경로가 연결되지 않았습니다.');return;}
     void read.current(prepared.id,offset).then(value=>{
       if(!alive)return;
+      if(value.planning_policy!==prepared.planningPolicy || (value.planning_policy&&value.planning_policy!=='full-wire-split-all-evidence-priority-v1'))throw new Error('요청 분할 정책이 일치하지 않습니다. 다시 준비하세요.');
+      if(value.durability_policy!==prepared.durabilityPolicy || (value.durability_policy&&value.durability_policy!=='independent-events-validated-candidates-v1'))throw new Error('실행 이력·결과 보존 정책이 일치하지 않습니다. 다시 준비하세요.');
+      if(value.failure_policy!==prepared.failurePolicy || (value.failure_policy && value.failure_policy!=='isolated-units-deferred-recovery-v1'))throw new Error('실패 복구 계약이 일치하지 않습니다. 다시 준비하세요.');
       if(value.relation_transition?.digest!==prepared.resume?.transition?.digest || value.transfer_digest!==prepared.transferDigest || value.chunk_text_truncated!==false || (prepared.relationRecovery&&value.relation_recovery_digest!==prepared.relationRecovery.digest))throw new Error('준비한 입력과 전송 확인 자료가 일치하지 않습니다. 다시 준비하세요.');
       if(value.relation_transition){const expected=prepared.resume?.transition;const observed=value.relation_transition;if(!expected||(['policy','digest','source_contract','target_contract','previous_attempts','max_attempts','max_regenerations','scope','old_response_or_feedback_reused'] as const).some(key=>observed[key]!==expected[key]))throw new Error('준비한 계약 전환과 전송 확인 자료가 일치하지 않습니다. 다시 준비하세요.');}
       if(prepared.diagnostic && (!value.diagnostic_request || value.diagnostic_request.wire_digest!==prepared.diagnostic.wireDigest || value.diagnostic_request.wire_bytes!==prepared.diagnostic.wireBytes || value.diagnostic_request.max_new_calls!==1 || value.diagnostic_request.automatic_retries!==0 || value.diagnostic_request.continue_analysis!==false))throw new Error('고정된 1회 진단 요청을 확인할 수 없습니다. 다시 준비하세요.');
@@ -25,7 +28,10 @@ export default function AnalysisPreview({prepared,actions,onReady}:{prepared:Pre
     }).catch(e=>{if(alive)setError(message(e));});
     return()=>{alive=false;};
   },[prepared.id,prepared.version,prepared.transferDigest,offset,onReady]);
-  return <section className="analysis-transfer"><h4>실제 전송 자료 확인</h4>
+  return <section className="analysis-transfer">
+    {prepared.planningPolicy&&<p className="notice">전체 직렬화 요청의 크기·Schema 제한을 지키도록 미완료 단위를 분할합니다. 중요한 근거를 임의 제외하지 않고 직접 연결된 자료부터 검토합니다. 같은 Commit·검색어만의 연결도 보존하므로 전체 요청량 감소를 보장하지 않습니다. 표현 불가능한 최소 단위는 미해결로 남깁니다. 기존 완료 결과는 정확히 같은 요청·검증 조건에서만 재사용합니다.</p>}<h4>실제 전송 자료 확인</h4>
+    {prepared.durabilityPolicy && <p className="notice">최종 처리에 실패해도 단계별 검증·실패·복구 이력과 필수 검증을 마친 후보는 별도로 보존합니다. 미검증 후보나 미해결 관계를 완성된 경험으로 표시하지 않습니다. 실패 응답은 진단 근거로 로컬에 보존하며 외부 AI 재전송 조건과 호출 한도는 그대로 유지합니다.</p>}
+    {prepared.failurePolicy && <p className="notice">개별 분석·관계 검증이 실패해도 독립 분석을 계속하고, 후처리에서 실패 단위만 남은 예산 안에서 다시 검토합니다. 성공 응답은 재사용하며 관계 요청의 기존 공유 2회 한도를 초기화하지 않습니다. 미해결 항목이 있으면 전체 성공으로 표시하지 않고 부분 결과와 남은 항목을 함께 보존합니다.</p>}
     {prepared.relationRecovery && <p className="notice">관계 근거 연결 검증 실패에 한해 같은 고정 자료와 비민감 오류 코드·개수·검증 규칙으로 최대 {prepared.relationRecovery.maxRegenerations}회 재생성할 수 있습니다. 통신 재시도를 포함해 논리적 관계 요청당 전송 진입은 최대 {prepared.relationRecovery.maxAttempts}회이며 날짜·새 실행·재시작으로 한도를 초기화하지 않습니다. 실패 응답 원문은 재전송하지 않습니다. feedback은 검증 결과와 같은 작업의 보존된 검증 정보에서만 구성됩니다. 아래 JSON의 생성 규칙·허용 필드·상한이 이번 동의 대상입니다.</p>}
     <p>현재 페이지의 분할 자료만 표시합니다. 전체 JSON에는 모든 분할 텍스트·출처·분석 지시와 전송할 비텍스트 bytes(base64)가 포함됩니다. 페이지 조회나 다운로드만으로 확인 완료로 간주하지 않습니다.</p>
     {actions.transferUrl && <a href={actions.transferUrl(prepared.id)} download>전체 전송 재료 JSON 다운로드</a>}

@@ -221,3 +221,91 @@ test('one-shot diagnostic requires exact preview and fresh consent without enabl
   expect(await page.evaluate(()=>JSON.stringify(localStorage))).not.toContain('SYNTHETIC EXACT OUTGOING REQUEST');
   await page.screenshot({path:info.outputPath('diagnostic-synthetic.png'),fullPage:true});
 });
+
+
+test('partial results retain validated candidates, unresolved relationships and evidence links',async({page},info)=>{
+  await page.getByLabel('저장된 분석 결과',{exact:true}).selectOption('synthetic-partial');
+  await expect(page.getByRole('heading',{name:'부분 결과 · 미해결 있음',exact:true})).toBeVisible();
+  await expect(page.getByText('전체 분석 성공이 아닙니다.',{exact:false})).toBeVisible();
+  await expect(page.getByText('검증을 통과한 후보 1개 · 복구된 분석 단위 1개 · 미해결 분석 단위 1개')).toBeVisible();
+  await expect(page.getByRole('heading',{name:'이전 합성 개발 경험 후보',exact:true})).toBeVisible();
+  await expect(page.getByText('관계 미해결 합성 후보',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'보존 근거 확인 · synthetic:note',exact:true}).click();
+  await expect(page.locator('.experience-evidence')).toContainText('합성 입력을 사용한 화면 검토입니다.');
+  await page.screenshot({path:info.outputPath('partial-results-desktop.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:info.outputPath('partial-results-mobile.png'),fullPage:true});
+});
+
+test('durable failure history shows exact measurements and certified partial evidence',async({page},info)=>{
+  await page.getByLabel('합성 화면 사례').selectOption('durable');
+  await page.getByRole('button',{name:'실행 상세·부분 결과 보기',exact:true}).click();
+  const journal=page.locator('.analysis-journal');
+  await expect(journal.getByRole('heading',{name:'실행 상세·보존된 부분 결과',exact:true})).toBeVisible();
+  await expect(journal.getByText('측정 33,554,433 bytes / 한도 33,554,432 bytes',{exact:true})).toBeVisible();
+  await expect(journal.getByText('serialized_bytes_gt_limit',{exact:false})).toBeVisible();
+  await expect(journal.getByRole('heading',{name:'필수 단계 검증 후보 1개',exact:true})).toBeVisible();
+  await expect(journal.getByText('독립 분석 종료 기록: partial · 미해결 1개',{exact:true})).toBeVisible();
+  await expect(journal.getByText('검증된 현재 연결에도 미해결 관계 1개가 있습니다.',{exact:false})).toBeVisible();
+  await journal.getByText('필수 검증을 마친 합성 후보 · 사용자 미검토',{exact:true}).click();
+  await expect(journal.getByText('일부 관계 미해결 · 합성 사례',{exact:true})).toBeVisible();
+  await journal.getByRole('button',{name:'보존 입력 확인 · synthetic:note',exact:true}).click();
+  await expect(journal.getByRole('heading',{name:'고정 입력의 보존 근거'})).toBeVisible();
+  await expect(journal.getByText('합성 입력을 사용한 화면 검토입니다.',{exact:true})).toBeVisible();
+  await journal.getByRole('button',{name:'검증 근거 1 보기',exact:true}).click();
+  await expect(journal.locator('pre').filter({hasText:'33554433'})).toBeVisible();
+  await expect(journal.getByRole('button',{name:'다음 이력',exact:true})).toBeDisabled();
+  await page.screenshot({path:info.outputPath('durable-history-desktop.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:info.outputPath('durable-history-mobile.png'),fullPage:true});
+});
+
+
+test('journal opens beside its execution with focus and supports loading empty and failed GET retry',async({page})=>{
+  observed.get(page)!.allowedApi=true;
+  let release:()=>void=()=>{},partialCalls=0,eventsCalls=0;
+  const pending=new Promise<void>(resolve=>{release=resolve;});
+  const reads:string[]=[];
+  const scope={end_collection_id:'synthetic-collection-1',collection_ids:['synthetic-collection-1'],materials:[]};
+  const latest={id:'queued-journal',state:'queued',created_at:'2026-10-29T00:00:00Z',event_count:0,scope};
+  await page.route('**/api/**',async route=>{
+    const request=route.request(),url=new URL(request.url());
+    expect(request.method()).toBe('GET');reads.push(url.pathname);
+    const reply=(value:unknown,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(value)});
+    if(url.pathname.endsWith('/analysis'))return reply({available:true,execution_available:true,capacity:{state:'busy'},executions:[latest,...Array.from({length:11},(_,i)=>({...latest,id:`older-${i}`,state:'failed'}))]});
+    if(url.pathname.endsWith('/events')){eventsCalls++;return reply({total:0,next_after:0,events:[],historical_detail_unknown:false});}
+    if(url.pathname.endsWith('/partial')){
+      partialCalls++;
+      if(partialCalls===1){await pending;return reply({code:'database_unavailable',detail:'합성 DB 조회 오류 · 진단 ID: synthetic-read-error'},503);}
+      return reply({total:0,offset:0,candidates:[],chunks:[],stage_verified:true,complete_analysis:false,graph_summary:null,unresolved_relations:[]});
+    }
+    throw new Error('Unexpected mock journal GET');
+  });
+  await page.goto('/experience-preview.html?adapter=1');
+  const row=page.locator('.analysis-history>li').first(),button=row.getByRole('button',{name:'실행 상세·부분 결과 보기',exact:true});
+  await button.click();
+  const panel=row.getByRole('region',{name:'실행 상세·보존된 부분 결과'});
+  await expect(panel).toBeFocused();await expect(button).toHaveAttribute('aria-expanded','true');
+  await expect(panel).toBeInViewport();
+  await expect(panel.getByRole('status').filter({hasText:'검증된 부분 결과를 불러오는 중'})).toBeVisible();
+  await expect(panel.getByRole('heading',{name:'필수 단계 검증 후보 0개',exact:true})).toHaveCount(0);
+  await expect(panel.getByText('이 과거 실행의 세부 검사·복구 이력은 보존되지 않아 UNKNOWN입니다.',{exact:false})).toHaveCount(0);
+  release();await expect(panel.getByRole('alert')).toContainText('synthetic-read-error');
+  await panel.getByRole('button',{name:'다시 조회',exact:true}).click();
+  await expect(panel.getByRole('heading',{name:'필수 단계 검증 후보 0개',exact:true})).toBeVisible();
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await expect(panel.getByText('아직 보존된 실행 이벤트가 없습니다.',{exact:false})).toBeVisible();
+  await expect(panel.getByText('보존된 이벤트 0개',{exact:true})).toBeVisible();
+  expect(partialCalls).toBe(2);expect(eventsCalls).toBe(2);
+  await page.screenshot({path:test.info().outputPath('journal-inline-desktop.png'),fullPage:true});
+  await panel.getByRole('button',{name:'이력 닫기',exact:true}).click();
+  await expect(button).toBeFocused();await expect(button).toHaveAttribute('aria-expanded','false');
+  await page.setViewportSize({width:390,height:844});await button.click();
+  await expect(panel).toBeFocused();await expect(panel).toBeInViewport();
+  await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:test.info().outputPath('journal-inline-mobile.png'),fullPage:true});
+  await button.click();await expect(panel).toHaveCount(0);
+  expect(reads.some(path=>path.includes('queued-journal/partial'))).toBe(true);
+});

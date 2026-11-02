@@ -67,11 +67,28 @@ def request_policy() -> dict[str, Any]:
     }
 
 
-def limit(kind: str) -> CollectionError:
-    return CollectionError(
-        "analysis_request_contract_limit_" + kind,
-        "로컬 Gemini 요청 계약의 크기·복잡도 한도를 초과했습니다. 완료 결과는 보존됩니다.",
-    )
+class RequestLimit(CollectionError):
+    """Measured local constraint, never a provider error or a consumed attempt."""
+
+    def __init__(self, kind: str, measured: int | None = None, maximum: int | None = None):
+        super().__init__(
+            "analysis_request_contract_limit_" + kind,
+            "로컬 Gemini 요청 계약의 크기·복잡도 한도를 초과했습니다. 완료 결과는 보존됩니다.",
+        )
+        self.details: dict[str, Any] = {
+            "stage": "request_plan",
+            "constraint": kind,
+            "condition": "measured_gt_limit" if measured is not None else "unknown",
+            "cause_status": "CONFIRMED" if measured is not None else "UNKNOWN",
+            "measured_value": measured,
+            "limit_value": maximum,
+        }
+        if "bytes" in kind:
+            self.details.update(measured_bytes=measured, limit_bytes=maximum)
+
+
+def limit(kind: str, measured: int | None = None, maximum: int | None = None) -> RequestLimit:
+    return RequestLimit(kind, measured, maximum)
 
 
 def validate_schema(schema: dict[str, Any]) -> None:
@@ -113,9 +130,9 @@ def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
             return node
         nodes += 1
         if nodes > SCHEMA_NODES:
-            raise limit("schema_nodes")
+            raise limit("schema_nodes", nodes, SCHEMA_NODES)
         if depth > SCHEMA_DEPTH:
-            raise limit("schema_depth")
+            raise limit("schema_depth", depth, SCHEMA_DEPTH)
         if "$ref" in node:
             ref = node["$ref"]
             if not isinstance(ref, str) or not ref.startswith("#/$defs/") or ref in refs:
@@ -130,8 +147,10 @@ def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
         values = node.get("enum", [])
         enums += len(values)
         enum_bytes += len(canonical(values).encode())
-        if enums > ENUM_VALUES or enum_bytes > ENUM_BYTES:
-            raise limit("schema_enum")
+        if enums > ENUM_VALUES:
+            raise limit("schema_enum", enums, ENUM_VALUES)
+        if enum_bytes > ENUM_BYTES:
+            raise limit("schema_enum_bytes", enum_bytes, ENUM_BYTES)
         result: dict[str, Any] = {}
         for key, value in node.items():
             if key in OMITTED_GRAMMAR_KEYS:
@@ -147,8 +166,9 @@ def provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
         return result
 
     result: dict[str, Any] = walk(schema, 0, frozenset())
-    if len(canonical(result).encode()) > SCHEMA_BYTES:
-        raise limit("schema_bytes")
+    measured = len(canonical(result).encode())
+    if measured > SCHEMA_BYTES:
+        raise limit("schema_bytes", measured, SCHEMA_BYTES)
     return result
 
 
@@ -160,9 +180,11 @@ def text_wire_bytes(body: dict[str, Any]) -> int:
     return len(json.dumps({**body, "contents": contents}, allow_nan=False).encode())
 
 
-def validate_wire(body: dict[str, Any]) -> None:
-    if text_wire_bytes(body) > TEXT_WIRE_BYTES:
-        raise limit("text_bytes")
+def validate_wire(body: dict[str, Any]) -> int:
+    measured = text_wire_bytes(body)
+    if measured > TEXT_WIRE_BYTES:
+        raise limit("text_bytes", measured, TEXT_WIRE_BYTES)
+    return measured
 
 
 def validate_plan(
@@ -171,10 +193,10 @@ def validate_plan(
     evidence: list[dict[str, Any]],
     context: object,
     schema: dict[str, Any],
-) -> None:
+) -> int:
     wire_schema = provider_schema(schema)
     text = canonical({"task": task, "context": canonical(context), "evidence": evidence})
-    validate_wire(
+    return validate_wire(
         {
             "contents": [{"role": "user", "parts": [{"text": text}]}],
             "systemInstruction": {"parts": [{"text": instruction}]},

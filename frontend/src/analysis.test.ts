@@ -64,7 +64,7 @@ describe('analysis provider diagnostics',()=>{
   it('distinguishes local request budgets from an observed provider400',()=>{
     const reason=analysisExecutionReason('analysis_request_contract_limit_schema_depth');
     expect(reason).toContain('전송 전에');expect(reason).toContain('제공자 HTTP 400과 구분');
-    expect(reason).toContain('자동 축소·재시도하지 않습니다');
+    expect(reason).toContain('최소 단위는 미해결로 남깁니다');
   });
   it('distinguishes observed HTTP400 categories from unknown historical refusal and quota',()=>{
     expect(analysisExecutionReason('provider_invalid_request')).toContain('구체적 거절 사유는 확인할 수 없습니다');

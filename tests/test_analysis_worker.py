@@ -134,9 +134,7 @@ def test_background_frozen_input_results_evidence_replay_and_previous_success(db
         "stage_assess",
     ],
 )
-def test_response_failure_preserves_previous_success_inputs_and_materials_without_retry(
-    db, tmp_path, kind
-):
+def test_response_failure_preserves_previous_success_and_bounds_unit_recovery(db, tmp_path, kind):
     control = tmp_path / "model-mode"
     control.write_text("success")
     pid, cid, store, owner, worker, directory = setup_worker(
@@ -163,7 +161,7 @@ def test_response_failure_preserves_previous_success_inputs_and_materials_withou
             (failed_request,),
         )
         failed = terminal(worker, pid, failed_request)
-        assert failed["state"] == "failed" and failed["result_run_id"] is None
+        assert failed["state"] == "failed"
         diagnostic = {
             "sdk_read_timeout": "provider_read_timeout_transport_hunknown",
             "sdk_body_timeout": "provider_read_timeout_body_partial_h200",
@@ -174,34 +172,54 @@ def test_response_failure_preserves_previous_success_inputs_and_materials_withou
             "stage_reconcile": "candidate_relation_invalid_m1_x0_v0",
             "stage_reconstruct": "invalid_evidence_reference",
             "stage_audit": "claim_audit_incomplete",
-            "stage_assess": "analysis_execution_failed",
+            "stage_assess": "unit_schema_invalid",
         }
-        assert failed["error_code"] == (
-            diagnostic or stage_errors.get(kind) or f"invalid_discovery_reference_{kind}"
-        )
         calls = db.all(
             "SELECT * FROM analysis_calls WHERE request_id=%s ORDER BY seq", (failed_request,)
         )
-        phases = ["discover", "consolidate", "reconcile", "reconstruct", "audit", "assess"]
-        expected = (
-            phases[: phases.index(kind.removeprefix("stage_")) + 1]
-            if stage_errors.get(kind)
-            else ["discover"]
-        )
-        assert [call["phase"] for call in calls] == expected
-        assert all(call["outcome"] == "responded" for call in calls[:-1])
-        assert calls[-1]["outcome"] == ("failed" if diagnostic else "responded")
-        assert calls[-1]["error_code"] == diagnostic
         if diagnostic:
+            assert failed["result_run_id"] is None
+            assert failed["error_code"] == diagnostic
+            assert [call["phase"] for call in calls] == ["discover"]
+            assert calls[-1]["outcome"] == "failed" and calls[-1]["error_code"] == diagnostic
             assert json.loads((directory / "quota.json").read_text())["count"] == 1
             assert "private" not in failed["error_code"]
+        else:
+            from collections import Counter
+
+            assert failed["result_run_id"] is not None
+            assert failed["error_code"] == "analysis_partial"
+            partial = Experiences(db).detail(pid, str(failed["result_run_id"]))["result"]
+            assert partial["coverage"]["analysis_status"] == "partial"
+            assert partial["coverage"]["unresolved"]
+            expected = stage_errors.get(kind) or f"invalid_discovery_reference_{kind}"
+            assert partial["coverage"]["history_request_id"] == failed_request
+            assert partial["coverage"]["events_available"]
+            assert expected in {
+                e["data"]["code"]
+                for e in db.all(
+                    "SELECT data FROM analysis_events WHERE request_id=%s AND kind='unit_failed'",
+                    (failed_request,),
+                )
+            }
+            assert max(Counter(c["unit_request_digest"] for c in calls).values()) <= 2
+            assert all(call["outcome"] == "responded" for call in calls)
+            invalid_task = kind.removeprefix("stage_") if kind.startswith("stage_") else "discover"
+            saved = db.all(
+                "SELECT task FROM analysis_checkpoints WHERE request_id=%s", (failed_request,)
+            )
+            assert all(c["task"] != invalid_task for c in saved)
         assert Experiences(db).detail(pid, str(first["result_run_id"])) == previous
-        assert len(Experiences(db).listing(pid)) == 1
+        assert len(Experiences(db).listing(pid)) == (1 if diagnostic else 2)
         assert db.all("SELECT * FROM collections WHERE project_id=%s", (pid,)) == before_collections
         assert store.listing(pid) == before_materials
         assert {
-            path: (store.root / path).read_bytes() for path in stored_files(store)
+            path: (store.root / path).read_bytes()
+            for path in stored_files(store)
+            if path.parts[0] != ".analysis-workers"
         } == before_files
+        if diagnostic:
+            assert list(worker.files.root.glob("*.failure.jsonl"))
         accepted_input = db.one(
             "SELECT input_payload,input_manifest,consent FROM analysis_requests WHERE id=%s",
             (failed_request,),
@@ -316,7 +334,13 @@ def test_narrow_retry_and_no_blind_resend_or_graph_restart(db, tmp_path, mode, e
         assert result["call_seq"] == len(ledger) == len(list(directory.glob("attempt-*")))
         if calls is not None:
             assert len(ledger) == calls
-            assert Experiences(db).listing(pid) == []
+            if mode == "503always":
+                partial = Experiences(db).detail(pid, str(result["result_run_id"]))["result"]
+                assert partial["coverage"]["analysis_status"] == "partial"
+                assert partial["coverage"]["unresolved"]
+                assert partial["candidates"] == []
+            else:
+                assert Experiences(db).listing(pid) == []
         else:
             run = Experiences(db).detail(pid, str(result["result_run_id"]))
             assert len(ledger) == run["result"]["model_calls"] + 1
@@ -482,7 +506,13 @@ def test_actual_attempt_budget_and_corrupt_input_fail_without_success(db, tmp_pa
         db.execute("UPDATE analysis_requests SET call_seq=512 WHERE id=%s", (request,))
         with pytest.raises(CollectionError) as exc:
             worker.state.enter_call(
-                pid, request, str(claimed["owner_token"]), 513, "discover", "a" * 64
+                pid,
+                request,
+                str(claimed["owner_token"]),
+                513,
+                "discover",
+                "a" * 64,
+                unit_request_digest="b" * 64,
             )
         assert exc.value.code == "analysis_budget_exceeded"
         worker.state.finish(pid, request, str(claimed["owner_token"]), code=exc.value.code)
@@ -714,6 +744,16 @@ def test_unexpected_save_failure_rolls_back_result_and_releases_after_failure(
         assert (
             Experiences(db).listing(pid) == [] and db.all("SELECT * FROM experience_evidence") == []
         )
+        from project_log.analysis_events import validated_candidates
+
+        with db.connect() as conn:
+            row = conn.execute("SELECT * FROM analysis_requests WHERE id=%s", (request,)).fetchone()
+            assert row and len(validated_candidates(conn, row)) == 1
+        diagnostics = db.all(
+            "SELECT data FROM analysis_events WHERE request_id=%s AND kind='finalization_failed'",
+            (request,),
+        )
+        assert any(e["data"].get("operation") == "partial_result_persist" for e in diagnostics)
         store.add(pid, "released.md", b"Known final failure unlocks")
     finally:
         stop(worker, owner)
@@ -745,6 +785,14 @@ def test_sdk_mock_retry_uses_fresh_wire_gate_and_preserves_failure_evidence(db, 
         assert cooldown.total_seconds() >= worker.profile["retry_delay"] == 30.0
         run = Experiences(db).detail(pid, str(result["result_run_id"]))
         assert len(ledger) == run["result"]["model_calls"] + 1
+        retries = db.all(
+            "SELECT data FROM analysis_events WHERE request_id=%s "
+            "AND kind='attempt_retry_scheduled'",
+            (request,),
+        )
+        assert retries and retries[0]["data"]["delay_seconds"] == 30.0
+        assert retries[0]["data"]["code"] == "provider_temporarily_unavailable"
+        assert retries[0]["data"]["reason"] == "reviewed_transport_retry_within_shared_budget"
     finally:
         stop(worker, owner)
 

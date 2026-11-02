@@ -188,6 +188,7 @@ class _ExperienceTransport(_SyntheticTransport):
         self.expected_schema = expected_schema
         self.quota = quota
         self.reservation: str | None = None
+        self.response_content: bytes | None = None
 
     def before_send(self, request: httpx.Request) -> None:
         def enter() -> None:
@@ -245,6 +246,7 @@ class _ExperienceTransport(_SyntheticTransport):
             )
         validate_wire(body)
         response = super().handle_request(request)
+        self.response_content = response.content
         self.stage = "quota_usage"
         if self.quota and self.reservation:
             self.quota.usage(self.reservation, json.loads(self.usage_json).get("promptTokenCount"))
@@ -268,6 +270,7 @@ class GeminiExperienceModel:
         self.before_send = before_send
         self.quota = quota
         self.usage: list[dict[str, Any]] = []
+        self.validation_failure: Callable[[dict[str, Any]], None] | None = None
 
     def complete(
         self,
@@ -308,6 +311,7 @@ class GeminiExperienceModel:
         model: ChatGoogleGenerativeAI | None = None
         failed = True
         stage = "request"
+        result: Any = None
         try:
             text = canonical(
                 {"task": task, "context": context, "evidence": [c.payload() for c in chunks]}
@@ -388,6 +392,48 @@ class GeminiExperienceModel:
                 ) from None
             raise
         except Exception as exc:
+            if isinstance(exc, OutputParserException) and self.validation_failure:
+                failure = _provider_failure(
+                    exc,
+                    transport.stage if transport else stage,
+                    transport.status_code if transport else None,
+                )
+                self.validation_failure(
+                    {
+                        "code": failure.code,
+                        "condition": "sdk_response_parse",
+                        "cause_status": "CONFIRMED",
+                        "provider_reason_status": "UNKNOWN",
+                        "response": json.loads(transport.response_content)
+                        if transport and transport.response_content
+                        else None,
+                        "schema": schema.model_json_schema(),
+                    }
+                )
+            if isinstance(exc, ValidationError) and self.validation_failure:
+                errors = [
+                    {"type": e["type"], "loc": [str(v) for v in e["loc"]]}
+                    for e in exc.errors(include_input=False, include_url=False)
+                ]
+                failure = _provider_failure(
+                    exc,
+                    transport.stage if transport else stage,
+                    transport.status_code if transport else None,
+                )
+                self.validation_failure(
+                    {
+                        "code": failure.code,
+                        "condition": "structured_response_schema"
+                        if transport and transport.stage == "validation"
+                        else "request_or_sdk_schema",
+                        "cause_status": "CONFIRMED",
+                        "provider_reason_status": "UNKNOWN",
+                        "http_status": transport.status_code if transport else None,
+                        "errors": errors,
+                        "response": result,
+                        "schema": schema.model_json_schema(),
+                    }
+                )
             raise _provider_failure(
                 exc,
                 transport.stage if transport else stage,

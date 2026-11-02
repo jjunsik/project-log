@@ -1,4 +1,4 @@
-const executionErrors:Record<string,string>={analysis_capacity_full:'다른 분석이 진행 중입니다. 종료 후 다시 요청하세요. 대기열에는 추가되지 않았습니다.',analysis_input_changed:'준비 이후 자료가 변경됐습니다. 다시 준비하고 새로 동의하세요.',analysis_preparation_lost:'준비 입력이 만료되거나 서버가 재시작됐습니다. 다시 준비하고 동의하세요.',failed_server_interrupted:'서버 재시작으로 실패했습니다. 자동 재개하지 않습니다.',failed_server_stopped:'서버 종료로 실패했습니다. 자동 재개하지 않습니다.',provider_network_error:'외부 통신 오류로 실패했습니다. 당시 세부 유형과 응답 수신 단계는 확인할 수 없습니다.'};
+const executionErrors:Record<string,string>={analysis_result_invalid:'최종 처리 검증에서 실패했습니다. 과거 실행에 세부 검사 기록이 없으면 정확한 조건은 UNKNOWN입니다. 실행 상세·보존된 중간 결과를 확인하세요.',analysis_partial:'검증된 부분 결과와 미해결 항목을 저장했습니다. 전체 분석 성공이 아닙니다. 저장된 분석 결과에서 확인하세요.',analysis_capacity_full:'다른 분석이 진행 중입니다. 종료 후 다시 요청하세요. 대기열에는 추가되지 않았습니다.',analysis_input_changed:'준비 이후 자료가 변경됐습니다. 다시 준비하고 새로 동의하세요.',analysis_preparation_lost:'준비 입력이 만료되거나 서버가 재시작됐습니다. 다시 준비하고 동의하세요.',failed_server_interrupted:'서버 재시작으로 실패했습니다. 자동 재개하지 않습니다.',failed_server_stopped:'서버 종료로 실패했습니다. 자동 재개하지 않습니다.',provider_network_error:'외부 통신 오류로 실패했습니다. 당시 세부 유형과 응답 수신 단계는 확인할 수 없습니다.'};
 const providerKinds:Record<string,string>={
   connect_timeout:'연결 제한시간 초과',read_timeout:'응답 읽기 제한시간 초과',write_timeout:'요청 쓰기 제한시간 초과',pool_timeout:'연결 풀 대기 제한시간 초과',timeout:'통신 제한시간 초과',
   connect_error:'연결 오류',read_error:'응답 읽기 오류',write_error:'요청 쓰기 오류',close_error:'연결 정리 오류',local_protocol:'클라이언트 Protocol 오류',remote_protocol:'상대측 Protocol 오류',protocol_error:'Protocol 오류',decoding_error:'응답 decoding 오류',
@@ -19,7 +19,7 @@ export function analysisExecutionReason(code?:string|null,singleRequest=false,re
   if(diagnostic[code])return diagnostic[code];
   const configuration:Record<string,string>={provider_authentication:'Gemini API Key가 유효하지 않거나 인증에 실패했습니다. 운영자 Key 설정을 확인하세요. 다시 요청할 때 새 준비·동의가 필요합니다.',provider_permission_denied:'Gemini 접근 권한이 없습니다. API 사용 권한·프로젝트·지역 및 Free Tier 설정을 확인하세요.',provider_model_unavailable:'Gemini 모델 또는 API 경로에 접근할 수 없습니다. 검토된 모델 이름·지원 API 버전과 접근 권한을 확인하세요.',provider_certificate_error:'Gemini TLS 인증서 검증에 실패했습니다. 로컬 인증서·네트워크 설정을 확인하세요. 인증서 검증을 끄지 않습니다.',ai_not_configured:'운영자 모델·Key·Free Tier 설정을 확인하세요.',operator_key_unavailable:'운영자 Key 파일의 존재·소유자·권한을 확인하세요.',gemini_free_state_unavailable:'로컬 호출량 기록을 안전하게 확인·보존할 수 없어 중단했습니다. 기록을 초기화하지 말고 파일·권한·저장 공간을 확인하세요.',gemini_free_request_limit:'단일 요청의 보수적 토큰 추정이 분당 한도를 초과합니다. 기다리는 것으로 해결되지 않으며 요청 크기 검토가 필요합니다.',gemini_free_tokens_unknown:'비텍스트 입력의 토큰량을 안전하게 사전 산정할 수 없어 중단했습니다. 완료 중간 결과는 보존됩니다.',analysis_request_schema_invalid:'전송 전 응답 Schema의 Gemini 요청 계약 위반을 확인했습니다. 외부 호출 없이 중단했으며 요청 수정·호환 검증이 필요합니다.',analysis_request_too_large:'로컬 요청 크기 제한을 초과해 전송 전에 중단했습니다. 요청 수정·호환 검증이 필요합니다.',provider_blocked:'Gemini가 입력을 차단했습니다. 입력·제공자 안전 정책을 확인하세요. 자동 재전송하지 않으며 완료 중간 결과는 보존됩니다.',provider_incomplete:'Gemini 응답이 정상 종료되지 않았습니다. 불완전한 결과는 저장하지 않으며 원인 확인 전 같은 계약으로 재개하지 않습니다.',provider_response_too_large:'응답 크기 제한을 초과했습니다. 해당 결과를 저장하지 않으며 요청·출력 범위를 확인해야 합니다.',analysis_call_outcome_unknown:'호출 진입 후 종료·중단되어 제공자 처리 결과는 미확인입니다. 응답·완료 결과를 추정하거나 호출량을 환급하지 않습니다.'};
   if(configuration[code])return `${configuration[code]} 자동 재전송은 하지 않습니다.`;
-  if(code.startsWith('analysis_request_contract_limit_'))return '로컬 Gemini 요청의 크기·Schema 복잡도 또는 필수 관계 문맥 한도를 초과해 전송 전에 중단했습니다. 제공자 HTTP 400과 구분하며 완료 중간 결과·출처는 보존합니다. 요청 수정·호환 검증이 필요하며 자동 축소·재시도하지 않습니다.';
+  if(code.startsWith('analysis_request_contract_limit_'))return '로컬 Gemini 요청의 크기·Schema 복잡도 또는 필수 문맥 한도를 초과해 해당 단위를 전송 전에 차단했습니다. 제공자 HTTP 400과 구분하며 완료 중간 결과·출처는 보존합니다. 전체 실행 상태와 상세 측정값을 확인하세요. 검토된 분할로도 표현할 수 없는 최소 단위는 미해결로 남깁니다.';
   if(['invalid_unknown_claim','unsupported_claim','invalid_evidence_reference','invalid_media_page','invalid_evidence_quote'].includes(code) || code.startsWith('invalid_discovery_reference_'))return '응답의 주장·근거 참조·인용 검증에 실패했습니다. 해당 결과는 저장하지 않으며 완료 중간 결과는 보존합니다. 원인 수정·호환 검증 전 같은 계약으로 재개하지 않습니다.';
   const server=/^provider_server_error_h(500|502|504)$/.exec(code);
   if(server)return `Gemini HTTP ${server[1]} 서버 오류로 제한된 재시도 후 중단했습니다. 완료 중간 결과와 호출 이력은 보존되며 나중에 새 준비·동의로 수동 재개할 수 있습니다.`;
@@ -31,19 +31,19 @@ export function analysisExecutionReason(code?:string|null,singleRequest=false,re
   if(code==='analysis_relation_transition_consumed')return '이 고정 자료의 새 계약 실행이 이미 접수됐습니다. 해당 새 실행의 상태와 재개 조건을 확인하세요. 구 계약에서 전환 기회를 다시 부여하지 않습니다.';
   if(code==='candidate_relation_grounding_invalid')return '그룹 관계의 설명·제공 근거 연결이 유효하지 않아 중단했습니다. 당시 세부 위반 조건은 보존되지 않았습니다. 잘못된 응답은 저장하지 않습니다.';
   const groundingLabels=/^candidate_relation_grounding_(merge|split)_labels_m([0-9]+)_x([0-9]+)_d([0-9]+)$/.exec(code);
-  if(groundingLabels)return `그룹 관계 근거 항목 검증 실패(${groundingLabels[1]==='merge'?'병합':'분리'}): 필요한 label 누락 ${groundingLabels[2]}개, 불필요한 label ${groundingLabels[3]}개, 중복 항목 ${groundingLabels[4]}개입니다. 해당 응답은 저장하지 않았으며 자동 재호출하지 않습니다.`;
+  if(groundingLabels)return `그룹 관계 근거 항목 검증 실패(${groundingLabels[1]==='merge'?'병합':'분리'}): 필요한 label 누락 ${groundingLabels[2]}개, 불필요한 label ${groundingLabels[3]}개, 중복 항목 ${groundingLabels[4]}개입니다. 해당 응답은 검증된 결과로 채택하지 않았으며 자동 재호출하지 않습니다.`;
   const groundingRefs=/^candidate_relation_grounding_(merge|split)_refs_d([0-9]+)_e([0-9]+)_x([0-9]+)_u([0-9]+)$/.exec(code);
-  if(groundingRefs)return `그룹 관계 근거 연결 검증 실패(${groundingRefs[1]==='merge'?'병합':'분리'}): 중복 참조 ${groundingRefs[2]}개, 구성원 수 초과 참조 ${groundingRefs[3]}개, 허용 근거 범위 밖 참조 ${groundingRefs[4]}개, 근거 미연결 구성원 ${groundingRefs[5]}개입니다. 해당 응답은 저장하지 않았으며 자동 재호출하지 않습니다.`;
+  if(groundingRefs)return `그룹 관계 근거 연결 검증 실패(${groundingRefs[1]==='merge'?'병합':'분리'}): 중복 참조 ${groundingRefs[2]}개, 구성원 수 초과 참조 ${groundingRefs[3]}개, 허용 근거 범위 밖 참조 ${groundingRefs[4]}개, 근거 미연결 구성원 ${groundingRefs[5]}개입니다. 해당 응답은 검증된 결과로 채택하지 않았으며 자동 재호출하지 않습니다.`;
   const groundingBlank=/^candidate_relation_grounding_(merge|split)_reason_blank_n([0-9]+)$/.exec(code);
-  if(groundingBlank)return `그룹 관계 설명 검증 실패(${groundingBlank[1]==='merge'?'병합':'분리'}): 공백뿐인 설명 ${groundingBlank[2]}개입니다. 해당 응답은 저장하지 않았으며 자동 재호출하지 않습니다.`;
+  if(groundingBlank)return `그룹 관계 설명 검증 실패(${groundingBlank[1]==='merge'?'병합':'분리'}): 공백뿐인 설명 ${groundingBlank[2]}개입니다. 해당 응답은 검증된 결과로 채택하지 않았으며 자동 재호출하지 않습니다.`;
   if(code==='candidate_relation_schema_invalid')return '전역 그룹 검토의 응답 구조가 유효하지 않아 중단했습니다. 잘못된 응답은 저장하지 않습니다.';
   const relation=/^candidate_relation_invalid_m([0-9]+)_x([0-9]+)_v([0-9]+)$/.exec(code);
-  if(relation)return `전역 그룹 배정 검증 실패: 누락 ${relation[1]}개, 미제공 ID ${relation[2]}개, 범위 밖 label ${relation[3]}개입니다. 해당 응답은 저장하지 않았으며 자동 재호출하지 않습니다.`;
+  if(relation)return `전역 그룹 배정 검증 실패: 누락 ${relation[1]}개, 미제공 ID ${relation[2]}개, 범위 밖 label ${relation[3]}개입니다. 해당 응답은 검증된 결과로 채택하지 않았으며 자동 재호출하지 않습니다.`;
   if(code==='candidate_coverage_invalid')return '후보 통합에서 Seed 처리 관계가 일치하지 않아 중단했습니다. 당시 누락·중복·잘못된 ID의 구체적 유형은 보존되지 않았습니다. 완료된 중간 결과는 유지되며 자동 재호출하지 않습니다.';
   const coverage=/^candidate_coverage_invalid_m([0-9]{1,3})_x([0-9]{1,6})_v([0-9]{1,6})_n([0-9]{1,3})$/.exec(code);
-  if(coverage)return `후보 통합 배정 검증 실패: 입력 Seed ${coverage[4]}개, 누락 ${coverage[1]}개, 제공되지 않은 ID ${coverage[2]}개, 범위 밖 그룹 label ${coverage[3]}개입니다. 해당 응답은 저장하지 않았으며 자동 재호출하지 않습니다.`;
+  if(coverage)return `후보 통합 배정 검증 실패: 입력 Seed ${coverage[4]}개, 누락 ${coverage[1]}개, 제공되지 않은 ID ${coverage[2]}개, 범위 밖 그룹 label ${coverage[3]}개입니다. 해당 응답은 검증된 결과로 채택하지 않았으며 자동 재호출하지 않습니다.`;
   const coverageSchema=/^candidate_coverage_invalid_schema_n([0-9]{1,3})$/.exec(code);
-  if(coverageSchema)return `후보 통합 응답 구조가 유효하지 않습니다(입력 Seed ${coverageSchema[1]}개). 해당 응답은 저장하지 않았으며 자동 재호출하지 않습니다.`;
+  if(coverageSchema)return `후보 통합 응답 구조가 유효하지 않습니다(입력 Seed ${coverageSchema[1]}개). 해당 응답은 검증된 결과로 채택하지 않았으며 자동 재호출하지 않습니다.`;
   const limits:Record<string,string>={
     analysis_legacy_budget_stop:'이전 정책의 누적 예산·사전 작업량 검사로 중단된 이력입니다. 실제 attempt 수와 구분하세요. 보존 결과는 새 정책의 준비·동의와 호환 검증 후 재사용할 수 있습니다.',
     gemini_free_daily_limit:'일일 할당량에 도달했습니다. 완료 중간 결과는 보존됩니다. 태평양 시간 자정 갱신 이후 새 준비·동의로 수동 재개하세요. 한국 고정 시각으로 판단하지 않습니다.',
@@ -64,6 +64,7 @@ export function analysisExecutionReason(code?:string|null,singleRequest=false,re
   const recovery:Record<string,string>={analysis_resume_unavailable:'재개할 수 있는 완료 중간 결과가 없습니다. 새 분석을 준비하세요.',analysis_resume_consumed:'이미 재개 실행이 접수됐습니다. 실행 이력에서 상태를 확인하세요.',analysis_checkpoint_invalid:'저장된 중간 결과의 순서·무결성·실행 계약을 확인할 수 없습니다. 자동으로 다시 호출하지 않습니다. 새 분석을 준비하세요.',analysis_policy_changed:'모델·분석 또는 전송 계약이 달라 재개할 수 없습니다. 새 분석을 준비하세요.',analysis_budget_exceeded:limits.analysis_budget_exceeded};
   if(recovery[code])return recovery[code];
   if(executionErrors[code])return executionErrors[code];
+  if(code.startsWith('analysis_result_')||code.startsWith('analysis_partial_result_')||code.startsWith('analysis_event_'))return `결과 또는 이력 보존 처리에서 실패했습니다. 상세 이력의 단계·검사 조건·측정값과 검증된 부분 결과를 확인하세요. (${code})`;
   const parsed=/^provider_(.+)_(request|setup|wire|quota|gate|transport|headers|body_wait|body_partial|body_complete|envelope|quota_usage|sdk|validation|response_close|client_close|transport_close|rate_limit_body|unknown)_h(unknown|[1-5][0-9]{2})$/.exec(code);
   if(parsed && providerKinds[parsed[1]]){
     const [,kind,stage,status]=parsed;

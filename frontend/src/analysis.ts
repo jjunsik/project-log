@@ -8,6 +8,7 @@ export interface PreparedAnalysis {
   id:string;version:string;endCollectionId:string;collectionIds:string[];materialIds:string[];
   items:PreparedItem[];provider:string;model:string;policy:string;transferScope:string;
   transferDigest:string;
+  failurePolicy?:string;planningPolicy?:string;durabilityPolicy?:string;
   diagnostic?:{wireDigest:string;wireBytes:number};
   relationRecovery?:{maxAttempts:number;maxRegenerations:number;digest:string};
   resume?:{requestId:string;checkpointCount:number;inheritedAttempts:number;compatibilityPolicy?:string;reusedStage?:string;transition?:RelationTransition};
@@ -16,7 +17,7 @@ export type ExecutionStatus='checking'|'rejected'|'queued'|'running'|'cancel_req
 export interface AnalysisExecution {
   id:string;status:ExecutionStatus;createdAt:string;endCollectionId:string;endCollectionLabel:string;
   collectionCount:number;materialCount:number;phase?:string;calls?:number;message?:string;
-  preparationId?:string;diagnostic?:boolean;diagnosticAvailable?:boolean;
+  eventCount?:number;failureDetail?:Record<string,unknown>;partial?:boolean;preparationId?:string;diagnostic?:boolean;diagnosticAvailable?:boolean;
   checkpointCount?:number;reusedCheckpoints?:number;inheritedAttempts?:number;
   resumeFromRequestId?:string;resumedByRequestId?:string;resumeBlockReason?:string;resumeAfter?:string;
 }
@@ -38,7 +39,7 @@ export interface AnalysisActions {
 }
 export interface TransferChunk {id:string;sources:Record<string,unknown>[];text:string|null;offset:number;media:null|{name:string;mime_type:string;sha256:string;size_bytes:number;provenance:Record<string,unknown>}}
 export interface DiagnosticRequest {endpoint:string;model:string;wire_digest:string;wire_bytes:number;max_new_calls:number;automatic_retries:number;continue_analysis:boolean;request:Record<string,unknown>}
-export interface TransferPreview {relation_transition?:RelationTransition;relation_recovery_digest?:string;relation_recovery?:Record<string,unknown>;diagnostic_request?:DiagnosticRequest;policy:string;input_digest:string;transfer_digest:string;system_instruction:string;task_instructions:Record<string,string>;response_schemas?:Record<string,unknown>;generation?:Record<string,unknown>;consolidation?:Record<string,unknown>;later_context:string;chunks:TransferChunk[];offset:number;total:number;all_chunks_included:boolean;chunk_text_truncated:false;media_bytes_included:boolean}
+export interface TransferPreview {planning_policy?:string;durability_policy?:string;failure_policy?:string;relation_transition?:RelationTransition;relation_recovery_digest?:string;relation_recovery?:Record<string,unknown>;diagnostic_request?:DiagnosticRequest;policy:string;input_digest:string;transfer_digest:string;system_instruction:string;task_instructions:Record<string,string>;response_schemas?:Record<string,unknown>;generation?:Record<string,unknown>;consolidation?:Record<string,unknown>;later_context:string;chunks:TransferChunk[];offset:number;total:number;all_chunks_included:boolean;chunk_text_truncated:false;media_bytes_included:boolean}
 export const unavailableAnalysis:AnalysisView={preparation:{state:'unavailable'},capacity:{state:'unknown'},historyAvailable:false,executions:[]};
 export const executionLabels:Record<ExecutionStatus,string>={checking:'접수 확인 중',rejected:'접수 거절',queued:'분석 대기',running:'분석 중',cancel_requested:'취소 정리 중',completed:'완료',failed:'실패',cancelled:'취소 완료'};
 export const isActiveAnalysis=(status:ExecutionStatus)=>['queued','running','cancel_requested'].includes(status);

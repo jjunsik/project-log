@@ -34,7 +34,7 @@ function Preview() {
 export function startPreview() {
   if(new URLSearchParams(location.search).has('adapter')){
     // Browser tests intercept every API request; this entry is excluded from production.
-    function AdapterPreview(){const {view,actions}=useAnalysis(projectId,true);return <main className="analysis-preview"><AnalysisFlow collections={collections} materials={materials} view={view} actions={actions} refreshMaterials={()=>{}}/></main>;}
+    function AdapterPreview(){const {view,actions}=useAnalysis(projectId,true);return <main className="analysis-preview"><AnalysisFlow projectId={projectId} collections={collections} materials={materials} view={view} actions={actions} refreshMaterials={()=>{}}/></main>;}
     createRoot(document.getElementById('root')!).render(<AdapterPreview/>);return;
   }
   // Never delegate to native fetch: even an unknown path cannot reach a real backend.

@@ -2,14 +2,16 @@
 
 import os
 import stat
+import time
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from project_log.analysis_admission import AnalysisAdmission, PrepareAnalysis, SubmitAnalysis
 from project_log.analysis_diagnostic import validate_target
+from project_log.analysis_events import DURABILITY_POLICY, validated_candidates
 from project_log.analysis_execution import execution_profile
 from project_log.analysis_recovery import changed_request_resume, daily_reset, resume_block
 from project_log.analysis_worker import AnalysisWorker
@@ -135,8 +137,12 @@ def request_view(
     row = db.one(
         "SELECT r.id,r.project_id,r.preparation_id,r.created_at,r.state,r.accepted_at,"
         "r.finished_at,r.started_at,r.cancel_requested_at,r.phase,r.call_seq,r.error_code,"
-        "r.result_run_id,r.resume_from_request_id,r.inherited_attempts,"
+        "r.result_run_id,r.result_partial,r.resume_from_request_id,r.inherited_attempts,"
         "r.input_digest AS _input_digest,"
+        "(SELECT count(*) FROM analysis_events e WHERE e.request_id=r.id) AS event_count,"
+        "(SELECT e.data FROM analysis_events e WHERE e.request_id=r.id "
+        "AND e.kind='finalization_failed' "
+        "ORDER BY event_seq DESC LIMIT 1) AS failure_detail,"
         "(SELECT count(*) FROM analysis_checkpoints c WHERE c.request_id=r.id) AS checkpoint_count,"
         "(SELECT count(*) FROM analysis_checkpoints c WHERE c.request_id=r.id "
         "AND c.origin_request_id<>r.id) AS reused_checkpoints,"
@@ -183,7 +189,10 @@ def request_view(
             row["resume_contract_changed"] = row[
                 "resume_block_reason"
             ] is None and changed_request_resume(original, profile)
-        if row["error_code"] == "gemini_free_daily_limit" and row["finished_at"]:
+        if (
+            row["error_code"] == "gemini_free_daily_limit"
+            or row["resume_block_reason"] == "analysis_resume_daily_wait"
+        ) and row["finished_at"]:
             row["resume_after"] = daily_reset(row["finished_at"]).isoformat()
     row["scope"] = {
         key: descriptor.get(key)
@@ -308,6 +317,190 @@ def router(db: Database, get_worker: Callable[[], AnalysisWorker | None]) -> API
             worker.profile if worker else None,
             worker.diagnostic_target if worker else None,
         )
+
+    @routes.get("/requests/{request_id}/events")
+    def events(
+        project_id: UUID,
+        request_id: UUID,
+        response: Response,
+        http_request: Request,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> Row:
+        http_request.state.analysis_read_started = time.monotonic()
+        http_request.state.analysis_read_stage = "events_request_lookup"
+        project, request = str(project_id), str(request_id)
+        original = db.one(
+            "SELECT state,consent->'descriptor'->'profile'->>'durability_policy' AS policy "
+            "FROM analysis_requests WHERE project_id=%s AND id=%s",
+            (project, request),
+        )
+        response.headers["Cache-Control"] = "no-store"
+        excluded = [
+            "context",
+            "response",
+            "schema",
+            "candidate",
+            "groups",
+            "seeds",
+            "pending_work",
+            "required_units",
+            "audit_pairs",
+        ]
+        http_request.state.analysis_read_stage = "events_page"
+        rows = db.all(
+            "SELECT event_seq,kind,phase,call_seq_observed,"
+            "unit_digest,created_at,data-%s::text[] AS data "
+            "FROM analysis_events WHERE project_id=%s AND request_id=%s AND event_seq>%s "
+            "ORDER BY event_seq LIMIT %s",
+            (excluded, project, request, after, limit),
+        )
+        http_request.state.analysis_read_stage = "events_count"
+        total = db.one(
+            "SELECT count(*) AS n FROM analysis_events WHERE project_id=%s AND request_id=%s",
+            (project, request),
+        )["n"]
+        return {
+            "events": rows,
+            "total": total,
+            "after": after,
+            "next_after": rows[-1]["event_seq"] if rows else after,
+            "execution_state": original["state"],
+            "historical_detail_unknown": total == 0
+            and original["state"] in {"completed", "failed", "cancelled", "rejected"}
+            and original["policy"] != DURABILITY_POLICY,
+        }
+
+    @routes.get("/requests/{request_id}/events/{event_seq}")
+    def event(
+        project_id: UUID,
+        request_id: UUID,
+        event_seq: int,
+        response: Response,
+        http_request: Request,
+    ) -> Row:
+        http_request.state.analysis_read_started = time.monotonic()
+        http_request.state.analysis_read_stage = "event_detail"
+        response.headers["Cache-Control"] = "no-store"
+        return db.one(
+            "SELECT event_seq,kind,phase,call_seq_observed,"
+            "unit_digest,created_at,data,payload_digest "
+            "FROM analysis_events WHERE project_id=%s AND request_id=%s AND event_seq=%s",
+            (str(project_id), str(request_id), event_seq),
+        )
+
+    @routes.get("/requests/{request_id}/partial")
+    def partial(
+        project_id: UUID,
+        request_id: UUID,
+        response: Response,
+        http_request: Request,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=5, ge=1, le=20),
+    ) -> Row:
+        from project_log.analysis_events import current_partition
+        from project_log.analysis_snapshot import decode_snapshot
+        from project_log.experiences import Limits, resolve_chunks, split_evidence
+
+        http_request.state.analysis_read_started = time.monotonic()
+        http_request.state.analysis_read_stage = "partial_request_lookup"
+        row = db.one(
+            "SELECT * FROM analysis_requests WHERE project_id=%s AND id=%s",
+            (str(project_id), str(request_id)),
+        )
+        http_request.state.analysis_read_stage = "partial_read_transaction"
+        with db.connect() as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            http_request.state.analysis_read_stage = "partial_candidate_validation"
+            candidates = validated_candidates(conn, row)
+            http_request.state.analysis_read_stage = "partial_partition"
+            plan = current_partition(conn, request_id)
+            http_request.state.analysis_read_stage = "partial_graph_summary"
+            summary = (
+                conn.execute(
+                    "SELECT data FROM analysis_events WHERE request_id=%s "
+                    "AND kind='graph_finished' "
+                    "AND event_seq>%s ORDER BY event_seq DESC LIMIT 1",
+                    (request_id, plan["event_seq"] if plan else 0),
+                ).fetchone()
+                if plan
+                else None
+            )
+            http_request.state.analysis_read_stage = "partial_transaction_end"
+        chosen = candidates[offset : offset + limit]
+        chunks = []
+        if chosen:
+            snapshot = decode_snapshot(
+                row["input_payload"], row["input_manifest"], row["input_digest"]
+            )
+            refs = {
+                c["evidence_id"]
+                for candidate in chosen
+                for claim in candidate["claims"]
+                for c in claim["citations"]
+            }
+            chunks = [
+                {"id": c.id, "references": list(c.references), "offset": c.offset}
+                for c in resolve_chunks(
+                    split_evidence(
+                        snapshot, Limits(**row["consent"]["descriptor"]["profile"]["limits"])
+                    ),
+                    sorted(refs),
+                )
+            ]
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "candidates": chosen,
+            "total": len(candidates),
+            "offset": offset,
+            "chunks": chunks,
+            "review_status": "unreviewed",
+            "stage_verified": True,
+            "complete_analysis": False,
+            "unresolved_relations": plan["data"].get("unresolved_relations", []) if plan else [],
+            "graph_summary": summary["data"] if summary else None,
+            "execution_state": row["state"],
+            "historical_detail_unknown": not plan
+            and row["state"] in {"completed", "failed", "cancelled", "rejected"}
+            and (row.get("consent") or {})
+            .get("descriptor", {})
+            .get("profile", {})
+            .get("durability_policy")
+            != DURABILITY_POLICY,
+        }
+
+    @routes.get("/requests/{request_id}/partial/evidence")
+    def partial_evidence(
+        project_id: UUID,
+        request_id: UUID,
+        reference: str,
+        response: Response,
+        http_request: Request,
+    ) -> Row:
+        import json
+
+        from project_log.analysis_snapshot import decode_snapshot
+
+        http_request.state.analysis_read_started = time.monotonic()
+        http_request.state.analysis_read_stage = "partial_evidence_request_lookup"
+        row = db.one(
+            "SELECT input_payload,input_manifest,input_digest FROM analysis_requests "
+            "WHERE project_id=%s AND id=%s",
+            (str(project_id), str(request_id)),
+        )
+        snapshot = decode_snapshot(row["input_payload"], row["input_manifest"], row["input_digest"])
+        entry = next((e for e in snapshot.entries if e.reference == reference), None)
+        if entry is None:
+            raise CollectionError("not_found", "해당 고정 입력 근거가 없습니다.")
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "reference": entry.reference,
+            "source": json.loads(entry.source_json),
+            "body": entry.text,
+            "reason": entry.reason,
+            "limitations": list(entry.limitations),
+            "media": [m.descriptor() for m in entry.media],
+        }
 
     @routes.post("/requests/{request_id}/cancel")
     def cancel(project_id: UUID, request_id: UUID) -> Row:

@@ -214,6 +214,32 @@ def test_response_validation_sdk_and_cleanup_boundaries_without_live_network(mon
     assert connection.close_count == len(connection.requests) == 1
 
 
+def test_schema_rejection_preserves_response_and_validation_locations_without_live_http(
+    monkeypatch,
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Live transport forbidden")
+
+    monkeypatch.setattr(httpx, "HTTPTransport", forbidden)
+    adapter = model()
+    connection = ModelConnection(retries=0, verify=True, trust_env=False)
+    connection.response_override = {"seeds": "Synthetic invalid schema"}
+    adapter.test_transport_factory = lambda: connection
+    recorded = []
+    adapter.validation_failure = recorded.append
+    with pytest.raises(CollectionError) as error:
+        adapter.complete("discover", "Synthetic", (), "{}", Discovery)
+    assert error.value.code == "provider_validation_error_validation_h200"
+    assert len(connection.requests) == len(recorded) == 1
+    diagnostic = recorded[0]
+    assert diagnostic["condition"] == "structured_response_schema"
+    assert diagnostic["http_status"] == 200
+    assert diagnostic["provider_reason_status"] == "UNKNOWN"
+    assert diagnostic["response"] == connection.response_override
+    assert diagnostic["schema"] == Discovery.model_json_schema()
+    assert diagnostic["errors"] == [{"type": "list_type", "loc": ["seeds"]}]
+
+
 def test_sdk_initialization_failure_is_classified_before_transport_entry():
     adapter = model()
 

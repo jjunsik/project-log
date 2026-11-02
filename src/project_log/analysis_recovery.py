@@ -8,6 +8,9 @@ from psycopg.types.json import Jsonb
 
 from project_log.analysis_checkpoints import (
     DISCOVERY_COMPATIBILITY,
+    DURABILITY_COMPATIBILITY,
+    ISOLATION_COMPATIBILITY,
+    PLANNING_COMPATIBILITY,
     RELATION_FIX_COMPATIBILITY,
     RELATION_RECOVERY_COMPATIBILITY,
     REQUEST_COMPATIBILITY,
@@ -145,9 +148,14 @@ def relation_budget(
         # Status can locate an unfinished call cheaply; prepare/child still validate
         # the exact immutable prefix and the actual next logical request.
         latest = conn.execute(
-            "SELECT logical_digest,phase FROM analysis_calls WHERE request_id=%s AND seq>"
-            "(SELECT COALESCE(max(origin_call_seq),0) FROM analysis_checkpoints "
-            "WHERE request_id=%s AND origin_request_id=%s) ORDER BY seq LIMIT 1",
+            "SELECT c.logical_digest,c.phase FROM analysis_calls c WHERE c.request_id=%s "
+            "AND c.phase='reconcile' AND NOT EXISTS (SELECT 1 FROM analysis_checkpoints cp "
+            "WHERE cp.request_id=%s AND cp.origin_request_id=c.request_id "
+            "AND cp.origin_call_seq=c.seq) "
+            "AND NOT EXISTS (SELECT 1 FROM analysis_checkpoints cp JOIN analysis_calls done "
+            "ON done.request_id=cp.origin_request_id AND done.seq=cp.origin_call_seq "
+            "WHERE cp.request_id=%s AND done.logical_digest=c.logical_digest) "
+            "ORDER BY c.seq LIMIT 1",
             (row["id"], row["id"], row["id"]),
         ).fetchone()
         if latest is None or latest["phase"] != "reconcile":
@@ -218,6 +226,73 @@ def resume_block(
     except CollectionError:
         return "analysis_policy_changed"
     code = original.get("error_code") or ""
+    if policy == PLANNING_COMPATIBILITY:
+        if code == "analysis_request_too_large" or code.startswith(
+            "analysis_request_contract_limit_"
+        ):
+            if (original.get("consent") or {}).get("descriptor", {}).get("diagnostic"):
+                return "analysis_diagnostic_stopped"
+            # This repairs local planning, not call/lineage limits. Preserve the
+            # same no-progress frontier and all per-unit Ledger/Quota gates.
+            return no_progress_block(conn, original, profile, old, now)
+        return resume_block(
+            conn, original, {k: v for k, v in profile.items() if k != "planning_policy"}, now=now
+        )
+    from project_log.experience_recovery import isolatable
+    from project_log.experiences import FAILURE_POLICY
+
+    isolated = profile.get("failure_policy") == FAILURE_POLICY
+    if (
+        isolated
+        and policy == ISOLATION_COMPATIBILITY
+        and (code == "analysis_partial" or isolatable(code))
+    ):
+        # No calls granted: exact per-unit Ledger checks still govern the child.
+        return None
+    durable_failure = False
+    if policy == DURABILITY_COMPATIBILITY and code == "analysis_result_invalid":
+        # Historical finalization subtype is UNKNOWN. Its actual daily stop is
+        # authoritative even though the terminal generic code hid it.
+        last = conn.execute(
+            "SELECT error_code FROM analysis_calls WHERE request_id=%s ORDER BY seq DESC LIMIT 1",
+            (original["id"],),
+        ).fetchone()
+        if (
+            last
+            and last["error_code"] == "gemini_free_daily_limit"
+            and original.get("finished_at")
+            and now < daily_reset(original["finished_at"])
+        ):
+            return "analysis_resume_daily_wait"
+        return None
+    if (
+        old == profile
+        and old.get("durability_policy")
+        and original.get("result_partial")
+        and code.startswith("analysis_result_")
+    ):
+        durable_failure = True
+    durable_partial = bool(
+        old == profile and old.get("durability_policy") and original.get("result_partial")
+    )
+    if durable_failure:
+        paused = conn.execute(
+            "SELECT data->>'code' AS code FROM analysis_events WHERE request_id=%s "
+            "AND kind='execution_paused' ORDER BY event_seq DESC LIMIT 1",
+            (original["id"],),
+        ).fetchone()
+        if (
+            paused
+            and paused["code"] == "gemini_free_daily_limit"
+            and original.get("finished_at")
+            and now < daily_reset(original["finished_at"])
+        ):
+            return "analysis_resume_daily_wait"
+    independent_resume = (
+        isolated
+        and old == profile
+        and (code == "analysis_partial" or durable_failure or durable_partial)
+    )
     if code in {"analysis_relation_attempts_exhausted", "analysis_relation_budget_unknown"}:
         return code
     if policy == RELATION_FIX_COMPATIBILITY:
@@ -270,12 +345,14 @@ def resume_block(
         return "analysis_resume_request_fix_required"
     if (
         validation_failure(code)
+        and not durable_failure
         and grounding_feedback(code) is None
         and policy != DISCOVERY_COMPATIBILITY
     ):
         return "analysis_resume_validation_required"
     if (
-        profile.get("relation_recovery") == relation_recovery_policy()
+        not independent_resume
+        and profile.get("relation_recovery") == relation_recovery_policy()
         and old.get("relation_recovery") == profile["relation_recovery"]
     ):
         try:
@@ -287,7 +364,7 @@ def resume_block(
             # the generic validation block while one authorized attempt remains.
             if grounding_feedback(code):
                 return None
-    if validation_failure(code) and policy != DISCOVERY_COMPATIBILITY:
+    if validation_failure(code) and not durable_failure and policy != DISCOVERY_COMPATIBILITY:
         return "analysis_resume_validation_required"
     finished = original.get("finished_at")
     if finished and code == "gemini_free_daily_limit" and now < daily_reset(finished):
@@ -295,6 +372,12 @@ def resume_block(
     if finished and code in {"provider_minute_limit", "provider_rate_limited"}:
         if now < finished + timedelta(seconds=60):
             return "analysis_resume_minute_wait"
+    return no_progress_block(conn, original, profile, old, now)
+
+
+def no_progress_block(
+    conn: psycopg.Connection[Row], original: Row, profile: Row, old: Row, now: datetime
+) -> str | None:
     # Three failed executions at the same frontier during the provider day are
     # enough to stop blind repetition. Next day still requires an explicit new
     # preparation/consent; histories and cumulative attempts never reset.

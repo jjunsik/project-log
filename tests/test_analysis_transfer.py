@@ -91,6 +91,10 @@ def test_discovery_preview_matches_sdk_schemas_and_binds_them_to_consent(db, tmp
             "relation_recovery",
             "relation_recovery_digest",
             "provider_response_schemas",
+            "failure_policy",
+            "durability_policy",
+            "planning_policy",
+            "discovery_plan",
         )
     }
     assert sha256(canonical(document).encode()) == preview["transfer_digest"]

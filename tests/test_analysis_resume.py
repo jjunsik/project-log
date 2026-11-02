@@ -101,7 +101,13 @@ def test_spawned_recovery_preserves_prefix_and_provenance_and_final_atomicity(
         snapshot = decode_snapshot(
             source["input_payload"], source["input_manifest"], source["input_digest"]
         )
-        assert result["result"] == ExperienceGraph(OfflineModel()).run(snapshot).model_dump()
+        expected = (
+            ExperienceGraph(OfflineModel(), isolate_failures=True, events=lambda *args: None)
+            .run(snapshot)
+            .model_dump()
+        )
+        expected["coverage"]["history_request_id"] = str(done["id"])
+        assert result["result"] == expected
         assert original(db, rid) == source
         assert read_rows(db, pid, rid) == saved
         assert len(Experiences(db).listing(pid)) == 1
@@ -369,19 +375,27 @@ def test_synthetic_sdk_quota_and_503_attempts_exclude_checkpoint_replay(db, tmp_
         attempts = 3 if mode == "checkpoint_sdk_failure" else 4
         assert failed["call_seq"] == attempts
         if mode == "checkpoint_sdk500":
-            assert failed["error_code"] == "provider_server_error_h500"
+            assert failed["error_code"] == "analysis_partial"
             ledger = db.all("SELECT * FROM analysis_calls WHERE request_id=%s ORDER BY seq", (rid,))
-            assert [c["outcome"] for c in ledger] == ["responded", "responded", "failed", "failed"]
-            assert (ledger[-1]["entered_at"] - ledger[-2]["finished_at"]).total_seconds() >= 30
+            assert [c["outcome"] for c in ledger] == [
+                "responded",
+                "responded",
+                "failed",
+                "failed",
+            ]
+            assert (ledger[3]["entered_at"] - ledger[2]["finished_at"]).total_seconds() >= 30
         assert json.loads((directory / "quota.json").read_text())["count"] == attempts
         control.write_text("checkpoint_sdk_success")
         prep = prepare_resume(worker, pid, cid, rid)
         row = worker.admission.submit(pid, submission(prep))
         done = terminal(worker, pid, str(row["id"]))
         assert done["state"] == "completed", done
-        assert done["call_seq"] == 2  # audit + assess, no discover/reconstruct re-entry
+        assert done["call_seq"] == 2  # audit + assess depend on recovered claims.
         assert done["inherited_attempts"] == attempts
-        assert json.loads((directory / "quota.json").read_text())["count"] == attempts + 2
+        assert (
+            json.loads((directory / "quota.json").read_text())["count"]
+            == attempts + done["call_seq"]
+        )
     finally:
         stop(worker, owner)
 
@@ -412,6 +426,11 @@ def test_replayed_corruption_aborts_without_a_fresh_api_attempt(db, tmp_path, ki
                 (Jsonb(response), sha256(canonical(response).encode()), rid),
             )
         prep = prepare_resume(worker, pid, cid, rid)
+        if kind == "request_digest":
+            assert prep["state"] == "failed"
+            assert prep["error_code"] == "analysis_checkpoint_invalid"
+            assert original(db, rid)["call_seq"] == 3
+            return
         row = worker.admission.submit(pid, submission(prep))
         result = terminal(worker, pid, str(row["id"]))
         assert result["state"] == "failed" and result["call_seq"] == 0
