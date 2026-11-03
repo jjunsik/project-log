@@ -27,7 +27,7 @@ Git History와 index·Working Tree·safe untracked, Root `docs/`의 안전한 �
 - [`AGENTS.md`](AGENTS.md): Repository 전체의 개발 실행 규칙.
 
 내부 제품·Architecture 문서는 local-only `docs/`에 있다. 실행에 필수는 아니다.
-Root `current_status.md`는 보존된 과거 Session 자료이며, `chatgpt/`는 개인 ChatGPT 자료다.
+`chatgpt/`는 개인 ChatGPT 자료다.
 `chatgpt/`는 Codex 구현의 Source of Truth가 아니다.
 현재 구현·요구사항은 Source와 canonical 문서를 확인한다.
 내부 기록·원천 데이터·로컬 환경·Secret은 Public Git에 포함하지 않는다.

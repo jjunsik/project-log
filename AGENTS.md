@@ -49,11 +49,8 @@
 - 의미 있는 개발 경험의 입증·복원에 필요한 행위나 근거 자료를 Codex가 직접 수행·확보할 수
   없다면 필요한 사용자 행동·자료를 구체적으로 요청한다. Before/After 측정·스크린샷 등
   변경 후에는 확보하기 어려운 증거가 필요하다면 해당 상태를 변경하기 전에 요청한다.
-- Root `current_status.md`는 기존 과거 근거로 보존한다. 삭제·이동·초기화·과거 재작성이나
-  상시 누적 갱신을 하지 않으며 새 세션의 전체 필수 읽기 대상으로 사용하지 않는다.
-  필요한 과거 맥락이 그곳에만 있으면 해당 부분만 확인한다. 장기 사실은 기존 개발 문서에
-  보존하고 현재 진행상태·일회성 작업 정보는 AGENTS에 누적하지 않는다.
-  의존성·Runtime 버전의 기준은 Manifest / Lockfile / Runtime pin이다.
+- 현재 진행상태·일회성 작업 정보는 AGENTS에 누적하지 않는다.
+- 의존성·Runtime 버전의 기준은 Manifest / Lockfile / Runtime pin이다.
 - 장기 개발 문서는 Repository 최상위 `docs/` 아래에 작성하고 local-only / Git 제외 영역으로
   운용한다. 직접적인 Secret/Credential/민감정보를 기록하지 않는다. `docs/`는 현재 위치
   Convention이다. 개인 Session handoff 문서는 대상이 아니다.
