@@ -2,7 +2,7 @@
 
 ## 개발 하네스 연결
 
-범용 `ai-coding-harness` 0.1.1을 적용한다. 아래 경로는 Repository root 기준이다.
+범용 `ai-coding-harness` 0.1.1 기반의 2026-11-02 조건부 인수인계와 2026-11-03 책임 구분·완료 조건·총 실행 비용 보완을 적용한다. 아래 경로는 Repository root 기준이다.
 
 - `harness/RULES.md`의 공통 원칙을 읽고 이 파일의 기존·하위 지침과 함께 적용한다.
   이번 작업에서 이미 확인한 유효한 내용은 재사용하며, 중요한 충돌은 조용히 덮어쓰지 않는다.
@@ -11,15 +11,18 @@
 - 프로젝트 정보는 이 파일의 기준 문서·기록·승인 규칙과 Root README의 `준비와 실행`·`검증`,
   해당 문서가 연결한 실제 Runtime pin·Manifest·Lockfile·`Makefile`을 재사용한다.
   이 연결은 별도 `PROJECT.md`를 요구하지 않는다.
-- 공통 원칙의 새 인수인계 체계 미생성은 기존 `current_status.md`·Bootstrap 운영을 대체하거나
-  중단한다는 뜻이 아니다. 현재 요청의 파일 수정 금지·승인 제한은 항상 지킨다.
+- 조건부 인수인계의 작성·사용은 공통 규칙과 아래 프로젝트 경로를 따른다.
+  개발 Evidence 보존·Bootstrap 운영과 현재 요청의 파일 수정 금지·승인 제한은 유지한다.
 
 ## Context 활용과 문서
 
-- 이 파일과 작업 영역의 nested `AGENTS.md`, 공개 README를 먼저 읽는다. 관련 Source /
+- 이 파일과 작업 영역의 nested `AGENTS.md`를 먼저 읽고, 공개 README는 작업 관련 절만 읽는다. 관련 Source /
   Test / Config와 Git 상태, 필요한 diff·history·untracked 파일, 로컬 환경만 선택적으로 확인한다.
-- 현재 작업이 이전 상태·결정·맥락에 의존하면 local-only Root `current_status.md`가 있을 때
-  필요한 범위에서 확인한다. 제품 목표·범위·제약 판단에는 `docs/project_spec.md`를 확인하고,
+- 새 세션은 Git 제외 경로 `.local/session-handoff.md`의 존재 여부만 먼저 확인한다. 있으면
+  공통 규칙에 따라 사용 완료 여부·관련성·최신성을 확인한 뒤 필요한 내용만 사용한다. 없으면
+  기존 기준 문서와 Working Tree로 시작하며, 파일을 찾으려고 `.local/` 전체를 탐색하지 않는다.
+  실제 인수인계가 필요한 경우에만 이 경로를 사용하고, 일상 작업·세션 이동마다 생성하지 않는다.
+- 제품 목표·범위·제약 판단에는 `docs/project_spec.md`를 확인하고,
   제품 구현·수집 정책은 `docs/architecture.md`, PoC 작업은 `poc/phase0/` 내부 Context를 사용한다.
   Root `chatgpt/`는 사용자의 개인 handoff 영역이며 Product Source of Truth가 아니다.
   Decision / Change는 기록된 시점의 역사적 근거이며 현재 요구사항을 대신하지 않는다.
@@ -46,8 +49,10 @@
 - 의미 있는 개발 경험의 입증·복원에 필요한 행위나 근거 자료를 Codex가 직접 수행·확보할 수
   없다면 필요한 사용자 행동·자료를 구체적으로 요청한다. Before/After 측정·스크린샷 등
   변경 후에는 확보하기 어려운 증거가 필요하다면 해당 상태를 변경하기 전에 요청한다.
-- current_status는 현재 상태와 다음 작업을 위한 transient 문서다. 장기 사실은 성격에 맞는
-  자료에 보존하며 현재 진행상태·일회성 작업 정보는 AGENTS에 누적하지 않는다.
+- Root `current_status.md`는 기존 과거 근거로 보존한다. 삭제·이동·초기화·과거 재작성이나
+  상시 누적 갱신을 하지 않으며 새 세션의 전체 필수 읽기 대상으로 사용하지 않는다.
+  필요한 과거 맥락이 그곳에만 있으면 해당 부분만 확인한다. 장기 사실은 기존 개발 문서에
+  보존하고 현재 진행상태·일회성 작업 정보는 AGENTS에 누적하지 않는다.
   의존성·Runtime 버전의 기준은 Manifest / Lockfile / Runtime pin이다.
 - 장기 개발 문서는 Repository 최상위 `docs/` 아래에 작성하고 local-only / Git 제외 영역으로
   운용한다. 직접적인 Secret/Credential/민감정보를 기록하지 않는다. `docs/`는 현재 위치
@@ -102,7 +107,8 @@
 ## Bootstrap Capture — 조건부 적용 중
 
 - Bootstrap 기록도 출처와 한계를 가진 Evidence이며 자동 정답이 아니다.
-- 큰 작업·Phase / Session 전환·Context 유실 위험 전에 누적 자료로 작은 Checkpoint를 한다.
+- 큰 작업·Phase / Session 전환·Context 유실 위험 전에 중요한 근거를 기존 개발 기록에
+  필요한 만큼 보존한다. 별도 임시 인수인계는 공통 규칙의 조건을 충족할 때만 작성한다.
   Context 부족으로 검증 생략·완료 간주·Evidence 삭제를 하지 않는다. 임의 Compact / Session
   종료·전환 없이 근거를 들어 사용자에게 제안한다.
 - 실제 self-dogfooding과 Bootstrap 자료의 비교 검증 후 사용자 명시적 승인으로만 종료한다.
